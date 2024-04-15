@@ -1,0 +1,109 @@
+train_dataset:
+  dataset:
+    name: image-folder
+    args:
+      root_path: E:\Research\Datasets\AID_SR\AID_train_64_512\hr_512
+      repeat: 20
+      cache: in_memory
+  wrapper:
+    name: sr-implicit-downsampled
+    args:
+      inp_size: 48
+      scale_max: 4
+      augment: true
+      sample_q: 2304
+  batch_size: 16
+
+val_dataset:
+  dataset:
+    name: image-folder
+    args:
+      root_path: E:\Research\Datasets\AID_SR\AID_valid_64_512\hr_512
+      first_k: 10
+      repeat: 160
+      cache: in_memory
+  wrapper:
+    name: sr-implicit-downsampled
+    args:
+      inp_size: 48
+      scale_max: 4
+      sample_q: 2304
+  batch_size: 16
+
+data_norm:
+  inp: {sub: [0.5], div: [0.5]}
+  gt: {sub: [0.5], div: [0.5]}
+
+model:
+  name: saliif
+  args:
+    encoder_spec:
+      name: edsr
+      args:
+        no_upsampling: true
+    # imnet_spec:
+    #   name: mlp
+    #   args:
+    #     out_dim: 3
+    #     hidden_list: [256, 256, 256]
+    semantic_spec:
+      name: segdec
+      args: 
+        head_channels: 64
+        num_classes: 6
+        decoder_channels: [256,128,64,32]
+        # n_skip: 4
+        # skip_channels: [256,128,64,32]
+        # no_upsampling: true
+
+    embedding_coord:
+      name: mlp
+      args:
+        in_dim: 2
+        out_dim: 64
+        hidden_list: [256, 256, 256]
+        act: 'gelu'
+    embedding_scale:
+      name: mlp
+      args:
+        in_dim: 2
+        out_dim: 64
+        hidden_list: [256, 256, 256]
+        act: 'gelu'
+    imnet_q:
+      name: mlp
+      args:
+        in_dim: 2560
+        out_dim: 3
+        hidden_list: [256, 256, 256]
+        act: 'gelu'
+    imnet_k:
+      name: mlp
+      args:
+        in_dim: 2438
+        out_dim: 2304
+        hidden_list: [256, 256, 256]
+        act: 'gelu'
+    imnet_v:
+      name: mlp
+      args:
+        in_dim: 2688
+        out_dim: 2560
+        hidden_list: [256, 256, 256]
+        act: 'gelu'
+    # hidden_dim: 256
+
+optimizer:
+  name: adam
+  args:
+    lr: 1.e-4
+epoch_max: 1000
+multi_step_lr:
+  milestones: [200, 400, 600, 800]
+  gamma: 0.5
+
+epoch_val: 1
+epoch_save: 100
+save_dir: "results"
+
+resume: ~

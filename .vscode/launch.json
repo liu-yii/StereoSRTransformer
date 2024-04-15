@@ -1,0 +1,40 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: train",
+            "type": "python",
+            "request": "launch",
+            "program": "train.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--config",
+                "configs/train-AID/train_ssrtr-lte.yaml",
+                "--name",
+                "ssrtr-lte",
+                "--tag",
+                "debug",
+                "--gpu",
+                "0"
+            ]
+        },
+        {
+            "name": "Python: test",
+            "type": "python",
+            "request": "launch",
+            "program": "test.py",
+            "justMyCode": true,
+            "args": [
+                "--config",
+                "configs/test/test-flickr-2.yaml",
+                "--model",
+                "save/naf-lte_2024-03-09/epoch-last.pth",
+                "--window",
+                "0",
+                "--gpu",
+                "0"
+            ]
+        }
+    ]
+}
