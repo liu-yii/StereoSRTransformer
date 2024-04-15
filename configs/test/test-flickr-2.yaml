@@ -1,0 +1,22 @@
+test_dataset:
+  dataset:
+    name: stereo-image-folders
+    args:
+      # root_path_1: /media/yi/E/Research/Datasets/AID_SR/AID_valid_64_256/hr_256
+      # root_path_2: /media/yi/E/Research/Datasets/AID_SR/AID_valid_64_512/hr_512
+      root_path: E:\Research\Datasets\Flickr1024\Test
+      # root_path: /media/yi/E/Research/Datasets/Flickr1024/Test
+  wrapper:
+    name: sr-implicit-stereo
+    args: 
+      scale_min: 2
+  batch_size: 1 
+eval_type: benchmark-2
+eval_bsize: 30000
+save_dir: "results/flickr-x2"
+
+data_norm:
+  inp: {sub: [0.5], div: [0.5]}
+  gt: {sub: [0.5], div: [0.5]}
+
+  
