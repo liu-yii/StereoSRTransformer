@@ -150,12 +150,12 @@ class PositionEncodingSine1DRelative(nn.Module):
         self.scale = scale
 
     @torch.no_grad()
-    def forward(self, inputs):
+    def forward(self, input):
         """
-        :param inputs: NestedTensor
+        :param inputs: Tensor 
         :return: pos encoding [N,C,H,2W-1]
         """
-        x = inputs
+        x = input
 
         # update h and w if downsampling
         bs, _, h, w = x.size()
@@ -183,21 +183,3 @@ class PositionEncodingSine1DRelative(nn.Module):
         pos = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).flatten(1)  # 2W-1xC
 
         return pos
-
-
-def no_pos_encoding(x):
-    return None
-
-
-def build_position_encoding(args):
-    mode = args.position_encoding
-    channel_dim = args.channel_dim
-    if mode == 'sine1d_rel':
-        n_steps = channel_dim
-        position_encoding = PositionEncodingSine1DRelative(n_steps, normalize=False)
-    elif mode == 'none':
-        position_encoding = no_pos_encoding
-    else:
-        raise ValueError(f"not supported {mode}")
-
-    return position_encoding

@@ -1,18 +1,14 @@
 clc;close all;clear all;addpath(genpath('./'));
 
-% datasets = {'Rain100L'};
-% datasets = { 'test_b'};
-% datasets = {'RainDS_syn','RainDS_real'};
-% datasets = {'CG_raindrop_resized','real_raindrop_resized'};
 datasets = {'flickr'};
 num_set = length(datasets);
-modelname = 'naf-lte_2024-03-20';
+modelname = 'ssrtr-lte_2024-04-23';
 
 psnr_alldatasets = 0;
 ssim_alldatasets = 0;
 for idx_set = 1:num_set
-    file_path = strcat('results/flickr-x4/', modelname,'/');
-    % file_path = strcat('E:/code/deraindrop/WGWS-Net/results/-setting1-', datasets{idx_set}, '/');
+    file_path = 'E:/code/ssrtr/results/flickr-x2/ssrtr-lte_2024-04-23/';
+    %file_path = 'E:/code/NAFNet/results/NAFSSR-L_2x/visualization/Flickr1024/';
     gt_path = strcat('E:/Research/Datasets/Flickr1024/Test/');
     % gt_path = strcat('E:/Research/Datasets/Deraindrop_test/Raindrop_robotcar/', datasets{idx_set}, '/target/');
     path_list = [dir(strcat(file_path,'*.jpg')); dir(strcat(file_path,'*.png'))];

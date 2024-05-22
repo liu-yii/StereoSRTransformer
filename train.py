@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import random
+import numpy as np
 
 import yaml
 import torch
@@ -13,8 +15,20 @@ from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 import datasets
 import models
 import utils
+from utils import warp, loss_disp_smoothness, warp_coord
 from test import eval_psnr
 
+
+def mixup(lq, gt, alpha=1.2):
+    if random.random() < 0.5:
+        return lq, gt
+
+    v = np.random.beta(alpha, alpha)
+    r_index = torch.randperm(lq.size(0)).to(gt.device)
+
+    lq = v * lq + (1 - v) * lq[r_index, :]
+    gt = v * gt + (1 - v) * gt[r_index, :]
+    return lq, gt
 
 def make_data_loader(spec, tag=''):
     if spec is None:
@@ -24,9 +38,8 @@ def make_data_loader(spec, tag=''):
     dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
     
     log('{} dataset: size={}'.format(tag, len(dataset)))
-    for k, v in dataset[0].items():
-        if k!="filename":
-            log('  {}: shape={}'.format(k, tuple(v.shape)))
+    for k, v in dataset[0][0].items():
+        log('  {}: shape={}'.format(k, tuple(v.shape)))
 
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
         shuffle=(tag == 'train'), num_workers=8, pin_memory=True)
@@ -47,23 +60,27 @@ def prepare_training():
         optimizer = utils.make_optimizer(
             model.parameters(), sv_file['optimizer'], load_sd=True)
         epoch_start = sv_file['epoch'] + 1
-        if config.get('cosine_annealing') is None:
-            lr_scheduler = None
-        else:
+        if config.get('cosine_annealing'):
             lr_scheduler = CosineAnnealingLR(optimizer, T_max=config['epoch_max'], eta_min=config['cosine_annealing']['eta_min'])
-        for _ in range(epoch_start - 1):
-            lr_scheduler.step()
+        elif config.get('multi_step_lr'):
+            lr_scheduler = MultiStepLR(optimizer, **config['multi_step_lr'])
+        else:
+            lr_scheduler = None
+        # for _ in range(epoch_start - 1):
+        #     lr_scheduler.step()
         log('Resume training, epoch: #{}'.format(sv_file['epoch']))
     else:
         model = models.make(config['model']).cuda()
         optimizer = utils.make_optimizer(
             model.parameters(), config['optimizer'])
         epoch_start = 1
-        if config.get('cosine_annealing') is None:
-            lr_scheduler = None
-        else:
+        if config.get('cosine_annealing'):
             lr_scheduler = CosineAnnealingLR(optimizer, T_max=config['epoch_max'], eta_min=config['cosine_annealing']['eta_min'])
-
+        elif config.get('multi_step_lr'):
+            lr_scheduler = MultiStepLR(optimizer, **config['multi_step_lr'])
+        else:
+            lr_scheduler = None
+            
     log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
     return model, optimizer, epoch_start, lr_scheduler
 
@@ -72,6 +89,8 @@ def train(train_loader, model, optimizer, epoch):
     model.train()
     loss_fn = nn.L1Loss()
     train_loss = utils.Averager()
+    train_loss_rgb = utils.Averager()
+    train_loss_disp = utils.Averager()
     # metric_fn = utils.calc_psnr
 
     data_norm = config['data_norm']
@@ -83,21 +102,44 @@ def train(train_loader, model, optimizer, epoch):
     gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
-        for k, v in batch.items():
-            if k != "filename":
-                batch[k] = v.cuda()
+        data, filename, hr_size = batch
 
-        inp_left, inp_right = torch.chunk((batch['inp'] - inp_sub) / inp_div, 2, dim=-1)
-        gt_left, gt_right = torch.chunk((batch['gt'] - gt_sub) / gt_div , 2, dim=-1)
+        for k, v in data.items():
+            data[k] = v.cuda()
+        inp, gt, raw_hr = data['inp'], data['gt'], data['raw_hr']
+
+        if config["phase"] == "train" and config["use_mixup"]:
+            inp, gt = mixup(inp, gt)
+        inp_left, inp_right = torch.chunk((inp - inp_sub) / inp_div, 2, dim=-1)
+        gt_left, gt_right = torch.chunk((gt - gt_sub) / gt_div , 2, dim=-1)
+        raw_left, raw_right = torch.chunk((raw_hr - gt_sub) / gt_div , 2, dim=-1)
         
-        pred_left, pred_right, _ = model(inp_left, inp_right, batch['coord'], batch['cell'])
+        preds_left, preds_right = model(inp_left, inp_right, data['coord'], data['cell'])
+
+        pred_left, pred_right = preds_left[0], preds_right[0]
+        disp_l2r, disp_r2l = preds_left[1], preds_right[1]
         
-       
-        loss = (loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right))/2
+
+        loss_rgb = loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right)
+
+        h, w = hr_size[0][0], hr_size[1][0]
+        right_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
+        left_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
+        left_warp_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
+        right_warp_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
+
+        loss_photo = loss_fn(right_warp, gt_right) + \
+            loss_fn(left_warp, gt_left)
+        loss_cycle = loss_fn(left_warp_warp, gt_left) + \
+            loss_fn(right_warp_warp, gt_right)
+        # loss_smooth = loss_disp_smoothness(disp_l2r, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
+        lambda_loss = 0.1
+        loss = loss_rgb  + lambda_loss * (loss_photo + loss_cycle)
         # psnr = metric_fn(pred, gt)
-        
         train_loss.add(loss.item())
+        train_loss_rgb.add(loss_rgb.item())
+        train_loss_disp.add(lambda_loss * (loss_photo + loss_cycle))
 
         optimizer.zero_grad()
         loss.backward()
@@ -107,7 +149,7 @@ def train(train_loader, model, optimizer, epoch):
         pred_right = None
         loss = None
         
-    return train_loss.item()
+    return train_loss.item(), train_loss_rgb.item(), train_loss_disp.item()
 
 
 def main(config_, save_path):
@@ -143,13 +185,14 @@ def main(config_, save_path):
 
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
-        train_loss = train(train_loader, model, optimizer, \
+        train_loss, train_loss_rgb, train_loss_disp = train(train_loader, model, optimizer, \
                            epoch)
         if lr_scheduler is not None:
             lr_scheduler.step()
 
-        log_info.append('train: loss={:.4f}'.format(train_loss))
-        writer.add_scalars('loss', {'train': train_loss}, epoch)
+        log_info.append('train: loss_total={:.4f} loss_rgb={:.4f} loss_disp={:.4f}'.\
+                        format(train_loss, train_loss_rgb, train_loss_disp))
+        writer.add_scalars('loss', {'train': train_loss, 'rgb': train_loss_rgb, 'disp': train_loss_disp}, epoch)
 
         if n_gpus > 1:
             model_ = model.module
@@ -185,6 +228,10 @@ def main(config_, save_path):
 
             log_info.append('val: psnr={:.4f}'.format(val_res))
             writer.add_scalars('psnr', {'val': val_res}, epoch)
+
+            # for path, img in save_imgs:
+            #     writer.add_image(path, img, epoch, dataformats='HWC')
+
             if val_res > max_val_v:
                 max_val_v = val_res
                 torch.save(sv_file, os.path.join(save_path, 'epoch-best.pth'))
@@ -215,7 +262,7 @@ if __name__ == '__main__':
 
     save_name = args.name
     if save_name is None:
-        save_name = '_' + args.config.split('/')[-1][:-len('.yaml')]
+        save_name = os.path.split(args.config)[-1][:-len('.yaml')]
     if args.tag is not None:
         save_name += '_' + args.tag
     save_path = os.path.join('./save', save_name)

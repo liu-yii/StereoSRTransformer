@@ -9,8 +9,9 @@ test_dataset:
     name: sr-implicit-stereo
     args: 
       scale_min: 4
+      window_size: 8
   batch_size: 1
-eval_type: benchmark-4
+eval_type: test-4
 eval_bsize: 30000
 save_dir: "results/flickr-x4"
 

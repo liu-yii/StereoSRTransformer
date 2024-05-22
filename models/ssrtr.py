@@ -1,5 +1,4 @@
-# modified from: https://github.com/thstkdgus35/EDSR-PyTorch
-# modified from: https://github.com/JingyunLiang/SwinIR.git
+# modified from: https://github.com/thstkdgus35/EDSR-PyTorch and https://github.com/JingyunLiang/SwinIR.git
 # modified by: Yi Liu
 
 import numpy as np
@@ -13,6 +12,7 @@ from models import register
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 # from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from einops import rearrange, repeat
+from .positionencoder import PositionEncodingSine1DRelative
 from torch.utils.checkpoint import checkpoint
 
 class LayerNormFunction(torch.autograd.Function):
@@ -187,18 +187,52 @@ class WindowAttention(nn.Module):
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
 
-    def flops(self, N):
-        # calculate flops for 1 window with token length of N
-        flops = 0
-        # qkv = self.qkv(x)
-        flops += N * self.dim * 3 * self.dim
-        # attn = (q @ k.transpose(-2, -1))
-        flops += self.num_heads * N * (self.dim // self.num_heads) * N
-        #  x = (attn @ v)
-        flops += self.num_heads * N * N * (self.dim // self.num_heads)
-        # x = self.proj(x)
-        flops += N * self.dim * self.dim
-        return flops
+    # def flops(self, N):
+    #     # calculate flops for 1 window with token length of N
+    #     flops = 0
+    #     # qkv = self.qkv(x)
+    #     flops += N * self.dim * 3 * self.dim
+    #     # attn = (q @ k.transpose(-2, -1))
+    #     flops += self.num_heads * N * (self.dim // self.num_heads) * N
+    #     #  x = (attn @ v)
+    #     flops += self.num_heads * N * N * (self.dim // self.num_heads)
+    #     # x = self.proj(x)
+    #     flops += N * self.dim * self.dim
+    #     return flops
+
+class ChannelAttention(nn.Module):
+    """Channel attention used in RCAN.
+    Args:
+        num_feat (int): Channel number of intermediate features.
+        squeeze_factor (int): Channel squeeze factor. Default: 16.
+    """
+
+    def __init__(self, num_feat, squeeze_factor=16):
+        super(ChannelAttention, self).__init__()
+        self.attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(num_feat, num_feat // squeeze_factor, 1, padding=0),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(num_feat // squeeze_factor, num_feat, 1, padding=0),
+            nn.Sigmoid())
+
+    def forward(self, x):
+        y = self.attention(x)
+        return x * y
+class CAB(nn.Module):
+
+    def __init__(self, num_feat, compress_ratio=3, squeeze_factor=30):
+        super(CAB, self).__init__()
+
+        self.cab = nn.Sequential(
+            nn.Conv2d(num_feat, num_feat // compress_ratio, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(num_feat // compress_ratio, num_feat, 3, 1, 1),
+            ChannelAttention(num_feat, squeeze_factor)
+            )
+
+    def forward(self, x):
+        return self.cab(x)
 
 class SCAM(nn.Module):
     '''
@@ -219,8 +253,14 @@ class SCAM(nn.Module):
         self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x_l, x_r, cost):
-        b, c, h, w = x_l.shape
+    def forward(self, x, x_size, cost):
+        h, w = x_size
+        b, _, c = x.shape
+        x = x.view(b, h, w, c).permute(0, 3, 1, 2)  # B C H W
+        x_l, x_r = x.chunk(2, dim=0)
+        
+        # b, c, h, w = x_l.shape
+
         Q_l = self.l_proj1(self.norm_l(x_l)).permute(0, 2, 3, 1)  # B, H, Wl, c
         Q_r_T = self.r_proj1(self.norm_r(x_r)).permute(0, 2, 1, 3) # B, H, c, Wr (transposed)
 
@@ -234,14 +274,19 @@ class SCAM(nn.Module):
         F_l2r = torch.matmul(torch.softmax(attention.permute(0, 1, 3, 2), dim=-1), V_l) #B, H, Wr, c
         
         cost[0] += attention.contiguous()
-        cost[1] += attention.contiguous().permute(0, 1, 3, 2)   
+        cost[1] += attention.permute(0, 1, 3, 2).contiguous()   
         # scale
         F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
         F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
-        return x_l + F_r2l, x_r + F_l2r, cost
-
-class SwinTransformerBlock(nn.Module):
-    r""" Swin Transformer Block.
+        x_l = x_l + F_r2l
+        x_r = x_r + F_l2r
+        cross_x = torch.cat([x_l, x_r], dim=0).view(b, c, h, w).permute(0, 2, 3, 1).reshape(b, h * w, c)
+        
+        return cross_x, cost
+    
+    
+class StereoTransformerBlock(nn.Module):
+    r""" Stereo Transformer Block.
 
     Args:
         dim (int): Number of input channels.
@@ -280,7 +325,8 @@ class SwinTransformerBlock(nn.Module):
             dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         
-        self.cross_attn = SCAM(c=dim)
+        self.ch_attn = CAB(dim)
+        self.ch_scale = 0.01
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -317,7 +363,7 @@ class SwinTransformerBlock(nn.Module):
 
         return attn_mask
 
-    def forward(self, x, x_size, cost):
+    def forward(self, x, x_size):
         H, W = x_size
         B, L, C = x.shape
         # assert L == H * W, "input feature has wrong size"
@@ -325,7 +371,9 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
-
+        ################### channel attention###################
+        ch_x = self.ch_attn(x.permute(0, 3, 1, 2))
+        ch_x = ch_x.permute(0, 2, 3, 1).contiguous().view(B, H * W, C)
         ################### window attention###################
         # cyclic shift
         if self.shift_size > 0:
@@ -352,37 +400,24 @@ class SwinTransformerBlock(nn.Module):
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        ################### cross attention###################
-        x2 = x.permute(0, 3, 1, 2).contiguous().view(B, C, H, W)  # B C H W
-        x_left, x_right = x2.chunk(2, dim=0)
-        feat_left, feat_right, cost = self.cross_attn(x_left, x_right, cost)
-        cross_feat = torch.cat([feat_left, feat_right], dim=0)
+        ################### cross attention####################
+        # x2 = x.permute(0, 3, 1, 2).contiguous().view(B, C, H, W)  # B C H W
+        # x_left, x_right = x2.chunk(2, dim=0)
+        # feat_left, feat_right, cost = self.cross_attn(x_left, x_right, cost)
+        # cross_feat = torch.cat([feat_left, feat_right], dim=0)
         
-        x = x.view(B, H * W, C) + cross_feat.view(B, C, H, W).permute(0, 2, 3, 1).reshape(B, H * W, C)
+        
+        x = x.view(B, H * W, C)
 
         # FFN
-        x = shortcut + self.drop_path(x)
+        x = shortcut + self.drop_path(x) + ch_x*self.ch_scale
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x, cost
+        return x
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
                f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
-
-    def flops(self):
-        flops = 0
-        H, W = self.input_resolution
-        # norm1
-        flops += self.dim * H * W
-        # W-MSA/SW-MSA
-        nW = H * W / self.window_size / self.window_size
-        flops += nW * self.attn.flops(self.window_size * self.window_size)
-        # mlp
-        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
-        # norm2
-        flops += self.dim * H * W
-        return flops
 
 
 class PatchMerging(nn.Module):
@@ -427,15 +462,15 @@ class PatchMerging(nn.Module):
     def extra_repr(self) -> str:
         return f"input_resolution={self.input_resolution}, dim={self.dim}"
 
-    def flops(self):
-        H, W = self.input_resolution
-        flops = H * W * self.dim
-        flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
-        return flops
+    # def flops(self):
+    #     H, W = self.input_resolution
+    #     flops = H * W * self.dim
+    #     flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
+    #     return flops
 
 
 class BasicLayer(nn.Module):
-    """ A basic Swin Transformer layer for one stage.
+    """ A basic Stereo Transformer layer for one stage.
 
     Args:
         dim (int): Number of input channels.
@@ -466,7 +501,7 @@ class BasicLayer(nn.Module):
 
         # build blocks
         self.blocks = nn.ModuleList([
-            SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
+            StereoTransformerBlock(dim=dim, input_resolution=input_resolution,
                                  num_heads=num_heads, window_size=window_size,
                                  shift_size=0 if (i % 2 == 0) else window_size // 2,
                                  mlp_ratio=mlp_ratio,
@@ -475,7 +510,7 @@ class BasicLayer(nn.Module):
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                                  norm_layer=norm_layer)
             for i in range(depth)])
-
+        self.cross_attn = SCAM(c=dim)
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(input_resolution, dim=dim, norm_layer=norm_layer)
@@ -485,9 +520,10 @@ class BasicLayer(nn.Module):
     def forward(self, x, x_size, cost):
         for blk in self.blocks:
             if self.use_checkpoint:
-                x, attn = checkpoint.checkpoint(blk, x, x_size, cost)
+                x = checkpoint.checkpoint(blk, x, x_size)
             else:
-                x, attn = blk(x, x_size, cost)
+                x = blk(x, x_size)
+        x, cost = self.cross_attn(x, x_size, cost)
         if self.downsample is not None:
             x = self.downsample(x)
         return x, cost
@@ -495,17 +531,17 @@ class BasicLayer(nn.Module):
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
 
-    def flops(self):
-        flops = 0
-        for blk in self.blocks:
-            flops += blk.flops()
-        if self.downsample is not None:
-            flops += self.downsample.flops()
-        return flops
+    # def flops(self):
+    #     flops = 0
+    #     for blk in self.blocks:
+    #         flops += blk.flops()
+    #     if self.downsample is not None:
+    #         flops += self.downsample.flops()
+    #     return flops
 
 
 class RSTB(nn.Module):
-    """Residual Swin Transformer Block (RSTB).
+    """Residual Stereo Transformer Block (RSTB).
 
     Args:
         dim (int): Number of input channels.
@@ -570,15 +606,15 @@ class RSTB(nn.Module):
         res,cost = self.residual_group(x, x_size, cost)
         return self.patch_embed(self.conv(self.patch_unembed(res, x_size))) + x, cost
 
-    def flops(self):
-        flops = 0
-        flops += self.residual_group.flops()
-        H, W = self.input_resolution
-        flops += H * W * self.dim * self.dim * 9
-        flops += self.patch_embed.flops()
-        flops += self.patch_unembed.flops()
+    # def flops(self):
+    #     flops = 0
+    #     flops += self.residual_group.flops()
+    #     H, W = self.input_resolution
+    #     flops += H * W * self.dim * self.dim * 9
+    #     flops += self.patch_embed.flops()
+    #     flops += self.patch_unembed.flops()
 
-        return flops
+    #     return flops
 
 
 class PatchEmbed(nn.Module):
@@ -616,12 +652,12 @@ class PatchEmbed(nn.Module):
             x = self.norm(x)
         return x
 
-    def flops(self):
-        flops = 0
-        H, W = self.img_size
-        if self.norm is not None:
-            flops += H * W * self.embed_dim
-        return flops
+    # def flops(self):
+    #     flops = 0
+    #     H, W = self.img_size
+    #     if self.norm is not None:
+    #         flops += H * W * self.embed_dim
+    #     return flops
 
 
 class PatchUnEmbed(nn.Module):
@@ -653,9 +689,9 @@ class PatchUnEmbed(nn.Module):
         x = x.transpose(1, 2).view(B, self.embed_dim, x_size[0], x_size[1])  # B Ph*Pw C
         return x
 
-    def flops(self):
-        flops = 0
-        return flops
+    # def flops(self):
+    #     flops = 0
+    #     return flops
 
 
 class Upsample(nn.Sequential):
@@ -698,16 +734,14 @@ class UpsampleOneStep(nn.Sequential):
         m.append(nn.PixelShuffle(scale))
         super(UpsampleOneStep, self).__init__(*m)
 
-    def flops(self):
-        H, W = self.input_resolution
-        flops = H * W * self.num_feat * 3 * 9
-        return flops
+    # def flops(self):
+    #     H, W = self.input_resolution
+    #     flops = H * W * self.num_feat * 3 * 9
+    #     return flops
 
 
-class SwinIR(nn.Module):
-    r""" SwinIR
-        A PyTorch impl of : `SwinIR: Image Restoration Using Swin Transformer`, based on Swin Transformer.
-
+class StereoIR(nn.Module):
+    r""" 
     Args:
         img_size (int | tuple(int)): Input image size. Default 64
         patch_size (int | tuple(int)): Patch size. Default: 1
@@ -739,10 +773,8 @@ class SwinIR(nn.Module):
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
                  use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv',
                  **kwargs):
-        super(SwinIR, self).__init__()
+        super(StereoIR, self).__init__()
         num_in_ch = in_chans
-        num_out_ch = in_chans
-        num_feat = 64
         self.img_range = img_range
         if in_chans == 3:
             rgb_mean = (0.4488, 0.4371, 0.4040)
@@ -782,11 +814,12 @@ class SwinIR(nn.Module):
 
         # absolute position embedding
         if self.ape:
-            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
-            trunc_normal_(self.absolute_pos_embed, std=.02)
+            self.pos_encoding = PositionEncodingSine1DRelative(num_pos_feats=embed_dim)
+            # self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+            # trunc_normal_(self.absolute_pos_embed, std=.02)
+
 
         self.pos_drop = nn.Dropout(p=drop_rate)
-        self.softmax = nn.Softmax(dim=-1)
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
@@ -855,7 +888,7 @@ class SwinIR(nn.Module):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
-            x = x + self.absolute_pos_embed
+            x = x + self.pos_encoding(x)
         x = self.pos_drop(x)
 
         for layer in self.layers:
@@ -868,19 +901,24 @@ class SwinIR(nn.Module):
 
     def forward(self, x, cost):
         # x: 2B,C,H,W
-        H, W = x.shape[2:]
+        # H, W = x.shape[2:]
         x = self.check_image_size(x)
         x = self.conv_first(x)
         feat,cost = self.forward_features(x, cost)
         
         feat = self.conv_after_body(feat) + x
         feat_left, feat_right = feat.chunk(2, dim=0)
-        M_right_to_left = self.softmax(cost[0])                                  # (B*H) * Wl * Wr
-        M_left_to_right = self.softmax(cost[1])                                  # (B*H) * Wr * Wl
+        M_right_to_left = torch.softmax(cost[0], dim=-1)                                  # (B*H) * Wl * Wr
+        M_left_to_right = torch.softmax(cost[1], dim=-1)                                # (B*H) * Wr * Wl
         return feat_left, feat_right, M_left_to_right, M_right_to_left
 
 
 @register('ssrtr')
-def make_ssrtr(hidden_dim=96, num_layers=6, num_heads=6):
+def make_ssrtr(img_size = 48, patch_size=1, in_chans=3,
+                 hidden_dim=96, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
+                 window_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
+                 use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv'):
     args = Namespace()
-    return SwinIR(img_size=48, window_size=8)
+    return StereoIR(img_size=[24,96], window_size=8)

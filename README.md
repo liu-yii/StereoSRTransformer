@@ -83,7 +83,7 @@ SwinIR-LIIF|[Google Drive](https://drive.google.com/file/d/1TvXXvimq-FlVB6tOye5J
 
 **Train**: `python train.py --config configs/train-AID/train_ssrtr-lte.yaml --name ssrtr-lte --tag 2024-04-15 --gpu 0`
 
-**Test**: `python test.py --config configs/test/test-flickr-2.yaml --model save/naf-lte_2024-03-09/epoch-last.pth --gpu 0`
+**Test**: `python test.py --config configs/test/test-flickr-2.yaml --model save/ssrtr-lte_2024-03-09/epoch-last.pth --gpu 0`
 
 
 Model|Training time (# GPU)

@@ -5,6 +5,7 @@ from PIL import Image
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -363,7 +364,7 @@ class SRImplicitUniformVaried(Dataset):
 class SRImplicitStereo(Dataset):
 
     def __init__(self, dataset, inp_size=None, scale_min=1, scale_max=None,
-                 augment=False, sample_q=None):
+                 augment=False, sample_q=None, window_size=8):
         self.dataset = dataset
         self.inp_size = inp_size
         self.scale_min = scale_min
@@ -372,9 +373,18 @@ class SRImplicitStereo(Dataset):
         self.scale_max = scale_max
         self.augment = augment
         self.sample_q = sample_q
+        self.window_size = window_size
+        self.s = random.uniform(self.scale_min, self.scale_max)
 
     def __len__(self):
         return len(self.dataset)
+    
+    # def check_size(self, h, w):
+    #     if h % self.window_size != 0:
+    #         h = math.floor(h // self.window_size) * self.window_size
+    #     if w % self.window_size != 0:
+    #         w = math.floor(w // self.window_size) * self.window_size
+    #     return h, w
 
     def __getitem__(self, idx):
         imgl = self.dataset[idx]['img_l']
@@ -382,11 +392,25 @@ class SRImplicitStereo(Dataset):
         # img = torch.concatenate([imgl,imgr], dim=-1)
         filename = self.dataset[idx]['filename']
 
-        s = random.uniform(self.scale_min, self.scale_max)
-
+        s = self.s
+        
         if self.inp_size is None:
             h_lr = math.floor(imgl.shape[-2] / s + 1e-9)
             w_lr = math.floor(imgl.shape[-1] / s + 1e-9)
+            if self.window_size != 0:
+                # SwinIR Evaluation - reflection padding
+                # batch size : 1 for testing
+                # h_old, w_old = imgl.shape[-2:]
+                h_pad = (h_lr // self.window_size + 1) * self.window_size - h_lr
+                w_pad = (w_lr // self.window_size + 1) * self.window_size - w_lr
+                h_lr += h_pad
+                w_lr += w_pad
+                imgl = torch.cat([imgl, torch.flip(imgl, [1])], 1)[..., :round(h_lr * s), :]
+                imgl = torch.cat([imgl, torch.flip(imgl, [2])], 2)[..., :round(w_lr * s)]
+                imgr = torch.cat([imgr, torch.flip(imgr, [1])], 1)[..., :round(h_lr * s), :]
+                imgr = torch.cat([imgr, torch.flip(imgr, [2])], 2)[..., :round(w_lr * s)]
+            w_hr = round(w_lr * s)
+            h_hr = round(h_lr * s)
             imgl = imgl[:, :round(h_lr * s), :round(w_lr * s)] # assume round int
             imgl_down = resize_fn(imgl, (h_lr, w_lr))
             cropl_lr, cropl_hr = imgl_down, imgl
@@ -394,15 +418,16 @@ class SRImplicitStereo(Dataset):
             imgr_down = resize_fn(imgr, (h_lr, w_lr))
             cropr_lr, cropr_hr = imgr_down, imgr
         else:
-            w_lr = self.inp_size
+            h_lr, w_lr = self.inp_size
             w_hr = round(w_lr * s)
-            x0 = random.randint(0, imgl.shape[-2] - w_hr)
+            h_hr = round(h_lr * s)
+            x0 = random.randint(0, imgl.shape[-2] - h_hr)
             y0 = random.randint(0, imgl.shape[-1] - w_hr)
-            cropl_hr = imgl[:, x0: x0 + w_hr, y0: y0 + w_hr]
-            cropl_lr = resize_fn(cropl_hr, w_lr)
-            cropr_hr = imgr[:, x0: x0 + w_hr, y0: y0 + w_hr]
-            cropr_lr = resize_fn(cropr_hr, w_lr)
-
+            cropl_hr = imgl[:, x0: x0 + h_hr, y0: y0 + w_hr]
+            cropl_lr = resize_fn(cropl_hr, (h_lr, w_lr))
+            cropr_hr = imgr[:, x0: x0 + h_hr, y0: y0 + w_hr]
+            cropr_lr = resize_fn(cropr_hr, (h_lr, w_lr))
+        
         if self.augment:
             hflip = random.random() < 0.5
             vflip = random.random() < 0.5
@@ -421,13 +446,17 @@ class SRImplicitStereo(Dataset):
             cropl_hr = augment(cropl_hr)
             cropr_lr = augment(cropr_lr)
             cropr_hr = augment(cropr_hr)
-
+        
+        ## Coord and RGB
         hr_coord, hrl_rgb = to_pixel_samples(cropl_hr.contiguous())
         _, hrr_rgb = to_pixel_samples(cropr_hr.contiguous())
-
+        ## Raw HR
+        raw_hrl, raw_hrr = hrl_rgb, hrr_rgb
+        
+        # Sample
         if self.sample_q is not None:
             sample_lst = np.random.choice(
-                min(len(hrl_rgb),len(hrr_rgb)), self.sample_q, replace=False)
+                len(hr_coord), self.sample_q, replace=False)
             hr_coord = hr_coord[sample_lst]
             hrl_rgb = hrl_rgb[sample_lst]
             hrr_rgb = hrr_rgb[sample_lst]
@@ -435,12 +464,13 @@ class SRImplicitStereo(Dataset):
         cell = torch.ones_like(hr_coord)
         cell[:, 0] *= 2 / cropl_hr.shape[-2]
         cell[:, 1] *= 2 / cropl_hr.shape[-1]
-        crop_lr = torch.concatenate([cropl_lr,cropr_lr],dim=-1) #[3,H,2W]
-        hr_rgb = torch.concatenate([hrl_rgb, hrr_rgb],dim=1)    #[2304,6]
+        crop_lr = torch.cat([cropl_lr,cropr_lr],dim=-1)  #[3,H,2W]
+        hr_rgb = torch.cat([hrl_rgb, hrr_rgb],dim=-1)    #[2304,6]
+        raw_hr = torch.cat([raw_hrl, raw_hrr],dim=-1)    #[h_max*w_max, 10]
         return {
             'inp': crop_lr,
             'coord': hr_coord,
             'cell': cell,
             'gt': hr_rgb,
-            'filename': filename
-        }
+            'raw_hr': raw_hr,
+        }, filename, [h_hr, w_hr]
