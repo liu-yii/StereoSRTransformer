@@ -296,7 +296,7 @@ class NAFLTEOURS(nn.Module):
 
         return output
 
-    def gen_feat(self, x_left, x_right):
+    def gen_feat(self, x_left, x_right, scale):
         self.inp_l, self.inp_r = x_left, x_right
         b,c,h,w = self.inp_l.shape
         x = torch.cat((self.inp_l, self.inp_r), dim=0)
@@ -328,8 +328,9 @@ class NAFLTEOURS(nn.Module):
         # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
         # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
 
-        # self.disp_l2r = self.disp_l2r * 2.0 / w
-        # self.disp_r2l = self.disp_r2l * 2.0 / w
+        self.disp_l2r = self.disp_l2r * scale
+        self.disp_r2l = self.disp_r2l * scale
+        
         # ######################################## valid mask #########################################################
         # M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
         # V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
@@ -574,7 +575,7 @@ class NAFLTEOURS(nn.Module):
         return rgb, disp_r2l_h, mask_r2l_h
     
 
-    def forward(self, inp_left, inp_right, coord, cell):
-        self.gen_feat(inp_left, inp_right)
+    def forward(self, inp_left, inp_right, coord, cell, scale):
+        self.gen_feat(inp_left, inp_right, scale)
         return self.query_rgb_left(coord, cell), self.query_rgb_right(coord, cell),\
               (self.M_left_to_right, self.M_right_to_left)

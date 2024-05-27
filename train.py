@@ -102,7 +102,7 @@ def train(train_loader, model, optimizer, epoch):
     gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
-        data, filename, hr_size = batch
+        data, filename, scale = batch
 
         for k, v in data.items():
             data[k] = v.cuda()
@@ -114,7 +114,7 @@ def train(train_loader, model, optimizer, epoch):
         gt_left, gt_right = torch.chunk((gt - gt_sub) / gt_div , 2, dim=-1)
         raw_left, raw_right = torch.chunk((raw_hr - gt_sub) / gt_div , 2, dim=-1)
         
-        preds_left, preds_right, attention_map= model(inp_left, inp_right, data['coord'], data['cell'])
+        preds_left, preds_right, attention_map= model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
         pred_left, pred_right = preds_left[0], preds_right[0]
         disp_l2r, disp_r2l = preds_left[1], preds_right[1]

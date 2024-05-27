@@ -285,8 +285,9 @@ def warp_coord(coord, disp, raw_hr, mask, mode='l2r'):
     Borrowed from:
     '''
     b, _, _ = coord.shape
+    b, c, h, w = raw_hr.shape
     y_disp = torch.zeros_like(disp)
-    disp = torch.cat((disp, y_disp), dim=-1)
+    disp = torch.cat((disp * 2.0 / w, y_disp), dim=-1)
     if mode == 'r2l':
         disp = -disp
     coord_warp = coord + disp        # b, h*w, 2

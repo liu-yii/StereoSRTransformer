@@ -473,4 +473,4 @@ class SRImplicitStereo(Dataset):
             'cell': cell,
             'gt': hr_rgb,
             'raw_hr': raw_hr,
-        }, filename, [h_hr, w_hr]
+        }, filename, s
