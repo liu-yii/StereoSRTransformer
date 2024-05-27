@@ -16,7 +16,7 @@
                 "--tag",
                 "debug",
                 "--gpu",
-                "0"
+                "0" 
             ]
         },
         {
@@ -29,9 +29,7 @@
                 "--config",
                 "configs/test/test-flickr-2.yaml",
                 "--model",
-                "save/naf-lte_2024-03-09/epoch-last.pth",
-                "--window",
-                "0",
+                "save/ssrtr-lte_2024-05-16/epoch-last.pth",
                 "--gpu",
                 "0"
             ]

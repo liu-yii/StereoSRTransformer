@@ -96,31 +96,36 @@ class PairedImageFolders(Dataset):
     
 @register('stereo-image-folders')
 class StereoImageFolders(Dataset):
-    def __init__(self, root_path, split_file=None, split_key=None, first_k=None,
+    def __init__(self, root_path, split_file=None, split_key=None, first_k=None, phase='train',
                  repeat=1, cache='none'):
         self.repeat = repeat
         self.cache = cache
+        self.repeat = repeat
+        self.cache = cache
 
+        # if phase == 'train':
+        #     filenames = sorted(os.listdir(root_path))
         filenames = os.listdir(root_path)
-        imgs_len = len(filenames)//2
+        if first_k is not None:
+            filenames = filenames[:first_k]
         
         self.files = []
-        for idx in range(imgs_len):
-            file_l = os.path.join(root_path, '{:03}_L.png'.format(idx+1))
-            file_r = os.path.join(root_path, '{:03}_R.png'.format(idx+1))
+        for filename in filenames:
+            file_l = os.path.join(root_path, filename + '/hr0.png')
+            file_r = os.path.join(root_path, filename + '/hr1.png')
 
             if cache == 'none':
                 self.files.append({
                         'img_l': transforms.ToTensor()(Image.open(file_l).convert('RGB')),
                         'img_r': transforms.ToTensor()(Image.open(file_r).convert('RGB')),
-                        'filename': '{:04}.png'.format(idx+1)
+                        'filename': filename
                     })
 
             elif cache == 'in_memory':
                 self.files.append({
                         'img_l': transforms.ToTensor()(Image.open(file_l).convert('RGB')),
                         'img_r': transforms.ToTensor()(Image.open(file_r).convert('RGB')),
-                        'filename': '{:04}.png'.format(idx+1)
+                        'filename': filename
                     })
 
     def __len__(self):

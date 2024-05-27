@@ -150,15 +150,15 @@ class PositionEncodingSine1DRelative(nn.Module):
         self.scale = scale
 
     @torch.no_grad()
-    def forward(self, inputs):
+    def forward(self, input):
         """
-        :param inputs: NestedTensor
+        :param inputs: Tensor 
         :return: pos encoding [N,C,H,2W-1]
         """
-        x = inputs
+        x = input
 
         # update h and w if downsampling
-        bs, _, h, w = x.size()
+        bs, _, w = x.size()
         # if inputs.sampled_cols is not None:
         #     bs, w = inputs.sampled_cols.size()
         # if inputs.sampled_rows is not None:
@@ -182,22 +182,13 @@ class PositionEncodingSine1DRelative(nn.Module):
         # interleave cos and sin instead of concatenate
         pos = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).flatten(1)  # 2W-1xC
 
+        # indexes to shift rel pos encoding
+        indexes_r = torch.linspace(w - 1, 0, w).view(w, 1).to(x.device)
+        indexes_c = torch.linspace(0, w - 1, w).view(1, w).to(x.device)
+        pos_indexes = (indexes_r + indexes_c).view(-1).long()  # WxW' -> WW'
+
+        pos_enc = torch.index_select(pos_enc, 0, pos_indexes).view(w, w,-1)  # 2W-1xC -> WW'xC -> WxW'xC
+        # compute k_r, q_r
+        
+
         return pos
-
-
-def no_pos_encoding(x):
-    return None
-
-
-def build_position_encoding(args):
-    mode = args.position_encoding
-    channel_dim = args.channel_dim
-    if mode == 'sine1d_rel':
-        n_steps = channel_dim
-        position_encoding = PositionEncodingSine1DRelative(n_steps, normalize=False)
-    elif mode == 'none':
-        position_encoding = no_pos_encoding
-    else:
-        raise ValueError(f"not supported {mode}")
-
-    return position_encoding

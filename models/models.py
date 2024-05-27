@@ -1,15 +1,12 @@
 import copy
 
-
 models = {}
-
 
 def register(name):
     def decorator(cls):
         models[name] = cls
         return cls
     return decorator
-
 
 def make(model_spec, args=None, load_sd=False):
     if args is not None:

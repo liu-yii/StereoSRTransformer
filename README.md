@@ -1,13 +1,9 @@
-# Local Texture Estimator for Implicit Representation Function
-
-This repository contains the official implementation for LTE introduced in the following paper:
-
-[**Local Texture Estimator for Implicit Representation Function**](https://ipl.dgist.ac.kr/LTE_cvpr.pdf) (CVPR 2022)
+# Stereo Super Resolution with Transformer
 
 
 ## Installation
 
-Our code is based on Ubuntu 20.04, pytorch 1.10.0, CUDA 11.3 (NVIDIA RTX 3090 24GB, sm86) and python 3.6.
+Our code is based on Ubuntu 22.04, pytorch 1.10.0, CUDA 12.4 (NVIDIA RTX 4090 24GB) and python 3.10.
 
 We recommend using [conda](https://www.anaconda.com/distribution/) for installation:
 
@@ -85,9 +81,9 @@ SwinIR-LIIF|[Google Drive](https://drive.google.com/file/d/1TvXXvimq-FlVB6tOye5J
 
 ### **Ours**
 
-**Train**: `python train.py --config configs\train-AID\train_ssrtr-lte.yaml --name ssrtr-lte --tag 2024-04-15 --gpu 0`
+**Train**: `python train.py --config configs/train-AID/train_ssrtr-lte.yaml --name ssrtr-lte --tag 2024-04-15 --gpu 0`
 
-**Test**: `python test.py --config configs/test/test-flickr-2.yaml --model save/naf-lte_2024-03-09/epoch-last.pth --gpu 0`
+**Test**: `python test.py --config configs/test/test-flickr-2.yaml --model save/ssrtr-lte_2024-03-09/epoch-last.pth --gpu 0`
 
 
 Model|Training time (# GPU)
@@ -109,22 +105,6 @@ The script [Eval-Fourier-Feature-Space](https://github.com/jaewon-lee-b/lte/blob
 `python demo.py --input ./demo/Urban100_img012x2.png --model save/edsr-baseline-lte.pth --scale 2 --output output.png --gpu 0`
 
 
-## Citation
-
-If you find our work useful in your research, please consider citing our paper:
-
-```
-@InProceedings{lte-jaewon-lee,
-    author    = {Lee, Jaewon and Jin, Kyong Hwan},
-    title     = {Local Texture Estimator for Implicit Representation Function},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2022},
-    pages     = {1929-1938}
-}
-```
-
-
 ## Acknowledgements
 
-This code is built on [LIIF](https://github.com/yinboc/liif) and [SwinIR](https://github.com/JingyunLiang/SwinIR). We thank the authors for sharing their codes.
+This code is built on [LIIF](https://github.com/yinboc/liif), [SwinIR](https://github.com/JingyunLiang/SwinIR), [LTE](https://github.com/jaewon-lee-b/lte.git). We thank the authors for sharing their codes.

@@ -3,6 +3,8 @@ __pycache__/
 load/
 save/
 results/
+pretrained_models/
+
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/linux,python
