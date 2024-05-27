@@ -103,6 +103,7 @@ def train(train_loader, model, optimizer, epoch):
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
         data, filename, scale = batch
+        scale = scale[0]
 
         for k, v in data.items():
             data[k] = v.cuda()

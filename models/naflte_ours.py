@@ -330,7 +330,7 @@ class NAFLTEOURS(nn.Module):
 
         self.disp_l2r = self.disp_l2r * scale
         self.disp_r2l = self.disp_r2l * scale
-        
+
         # ######################################## valid mask #########################################################
         # M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
         # V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
