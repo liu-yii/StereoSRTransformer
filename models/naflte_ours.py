@@ -325,8 +325,11 @@ class NAFLTEOURS(nn.Module):
         self.disp_l2r, self.occ_left = out_l2r['disp_pred'].unsqueeze(1), out_l2r['occ_pred'].unsqueeze(1)
         self.disp_r2l, self.occ_right = out_r2l['disp_pred'].unsqueeze(1), out_r2l['occ_pred'].unsqueeze(1)
         ######################################## disp norm #########################################################
-        self.disp_l2r = self.disp_l2r * 2.0 / w
-        self.disp_r2l = self.disp_r2l * 2.0 / w
+        # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
+        # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
+
+        # self.disp_l2r = self.disp_l2r * 2.0 / w
+        # self.disp_r2l = self.disp_r2l * 2.0 / w
         # ######################################## valid mask #########################################################
         # M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
         # V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
@@ -352,8 +355,15 @@ class NAFLTEOURS(nn.Module):
         feat_leftW = torch.matmul(self.M_right_to_left, self.projr(self.feat_right).permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         feat = torch.cat((self.feat_left, feat_leftW), dim=1)
 
+        eps = 1e-6
+        mean_disp_pred = self.disp_l2r.mean()
+        std_disp_pred = self.disp_l2r.std() + eps
+        disp_pred_normalized = (self.disp_l2r - mean_disp_pred) / std_disp_pred
+
+        # normalize occlusion mask
+        occ_pred_normalized = (self.occ_left - 0.5) / 0.5
         # feat_d = torch.cat((self.feat_left, self.disp_l2r), dim=1)
-        feat_d = self.conv0(torch.cat((self.disp_l2r, self.occ_left), dim=1))
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized), dim=1))
 
         # feat = torch.cat((feat, self.disp_l2r), dim=1)
         # feat = self.feat_left
@@ -440,12 +450,14 @@ class NAFLTEOURS(nn.Module):
         rgb = ret + F.grid_sample(self.inp_l, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp_l2r_h = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(self.disp_l2r, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        disp_l2r_h = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        mask_l2r_h = ret_disp[:,:,1].unsqueeze(-1) + F.grid_sample(self.occ_left, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        mask_l2r_h = ret_disp[:,:,1].unsqueeze(-1) + F.grid_sample(occ_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
+        disp_l2r_h = disp_l2r_h * std_disp_pred + mean_disp_pred
+
         return rgb, disp_l2r_h, mask_l2r_h
     
     def query_rgb_right(self, coord, cell=None):
@@ -456,7 +468,14 @@ class NAFLTEOURS(nn.Module):
         
         # feat = self.feat_right + feat_rightW
         # feat_d = torch.cat((self.feat_right, self.disp_r2l), dim=1)
-        feat_d = self.conv0(torch.cat((self.disp_r2l, self.occ_right), dim=1))
+        eps = 1e-6
+        mean_disp_pred = self.disp_r2l.mean()
+        std_disp_pred = self.disp_r2l.std() + eps
+        disp_pred_normalized = (self.disp_r2l - mean_disp_pred) / std_disp_pred
+        # normalize occlusion mask
+        occ_pred_normalized = (self.occ_left - 0.5) / 0.5
+
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized), dim=1))
         # feat = self.feat_right
         # feat = torch.cat((feat, self.disp_r2l), dim=1)
         # key pos
@@ -550,6 +569,8 @@ class NAFLTEOURS(nn.Module):
         mask_r2l_h = ret_disp[:,:,1].unsqueeze(-1) + F.grid_sample(self.occ_right, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
+        disp_r2l_h = disp_r2l_h * std_disp_pred + mean_disp_pred
+        
         return rgb, disp_r2l_h, mask_r2l_h
     
 
