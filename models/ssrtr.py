@@ -572,9 +572,6 @@ class BasicLayer(nn.Module):
 
     def forward(self, x, x_size):
         for blk in self.blocks:
-            if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, x_size)
-            else:
                 x = blk(x, x_size)
         x, attn = self.cross_attn(x, x_size)
         if self.downsample is not None:
@@ -962,9 +959,9 @@ class StereoIR(nn.Module):
         
         feat = self.conv_after_body(feat) + x
         feat_left, feat_right = feat.chunk(2, dim=0)
-
-        M_right_to_left = attn['r2l']                              # (B*H) * Wl * Wr
-        M_left_to_right = attn['l2r']                                 # (B*H) * Wr * Wl
+        
+        M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
+        M_left_to_right = attn['l2r']                  
         return feat_left, feat_right, M_left_to_right, M_right_to_left
 
 

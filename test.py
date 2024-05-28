@@ -13,7 +13,7 @@ from tqdm import tqdm
 import datasets
 import models
 import utils
-from utils import make_coord
+from utils import make_coord, denormalize
 import cv2
 import numpy as np
 from PIL import Image
@@ -53,17 +53,17 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
-    if data_norm is None:
-        data_norm = {
-            'inp': {'sub': [0], 'div': [1]},
-            'gt': {'sub': [0], 'div': [1]}
-        }
-    t = data_norm['inp']
-    inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
-    inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
-    t = data_norm['gt']
-    gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
-    gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
+    # if data_norm is None:
+    #     data_norm = {
+    #         'inp': {'sub': [0], 'div': [1]},
+    #         'gt': {'sub': [0], 'div': [1]}
+    #     }
+    # t = data_norm['inp']
+    # inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
+    # inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
+    # t = data_norm['gt']
+    # gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
+    # gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
 
     if eval_type is None:
         metric_fn = partial(utils.calculate_psnr, crop_border=0)
@@ -86,7 +86,7 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         for k, v in data.items():
             data[k] = v.cuda()
         filename = filename[0].split('.')[0]
-        inp_left, inp_right = torch.chunk((data['inp'] - inp_sub) / inp_div, 2, dim=-1)
+        inp_left, inp_right = torch.chunk(data['inp'], 2, dim=-1)
         gt_left, gt_right = torch.chunk(data['gt'], 2, dim=-1)
         # SwinIR Evaluation - reflection padding
         _, _, h, w = inp_left.size()
@@ -95,19 +95,19 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         start_time = time.time()    
         if eval_bsize is None:
             with torch.no_grad():
-                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell, scale)
+                preds_left, preds_right, _ = model(inp_left, inp_right, coord, cell, scale)
         else:
             if fast:
-                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1), scale)
+                preds_left, preds_right, _ = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1), scale)
             else:
                 preds_left, preds_right = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize, scale) # cell clip for extrapolation
         infer_time = time.time()-start_time
         
         pred_left, pred_right = preds_left[0], preds_right[0]
         disp_l2r, disp_r2l = preds_left[1], preds_right[1]
-        pred_left = pred_left * gt_div + gt_sub
+        pred_left = denormalize(pred_left.view(scale*h, scale*w, 3))
         pred_left.clamp_(0, 1)
-        pred_right = pred_right * gt_div + gt_sub
+        pred_right = denormalize(pred_right.view(scale*h, scale*w, 3))
         pred_right.clamp_(0, 1)
         
         # for i, pred in enumerate([pred_left, pred_right]):   
@@ -126,8 +126,8 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         #     img.save(f'{save_dir}/{filename}_disp.png')
         if save_dir != None:
             save_imgs = {
-                        f'{save_dir}/{filename}_L.png': pred_left.view(scale*h, scale*w, 3),
-                        f'{save_dir}/{filename}_R.png': pred_right.view(scale*h, scale*w, 3),
+                        f'{save_dir}/{filename}_L.png': pred_left,
+                        f'{save_dir}/{filename}_R.png': pred_right,
                         f'{save_dir}/{filename}_disp.png': disp_l2r.view(scale*h, scale*w, 1)
                     }
             for path, img in save_imgs.items():

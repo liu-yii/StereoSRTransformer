@@ -11,7 +11,7 @@ from torchvision import transforms
 
 from datasets import register
 from utils import to_pixel_samples
-from utils import make_coord
+from utils import make_coord, resize_fn
 
 @register('sr-implicit-paired')
 class SRImplicitPaired(Dataset):
@@ -150,11 +150,6 @@ class SRImplicitPairedFast(Dataset):
             'filename': filename
         }
     
-    
-def resize_fn(img, size):
-    return transforms.ToTensor()(
-        transforms.Resize(size, Image.BICUBIC)(
-            transforms.ToPILImage()(img)))
 
 
 @register('sr-implicit-downsampled')

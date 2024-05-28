@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 import datasets
 import models
 import utils
-from utils import warp, loss_disp_smoothness, warp_coord, NestedTensor
+from utils import warp, loss_disp_smoothness, warp_coord, denormalize
 from test import eval_psnr
 
 
@@ -93,13 +93,13 @@ def train(train_loader, model, optimizer, epoch):
     train_loss_disp = utils.Averager()
     # metric_fn = utils.calc_psnr
 
-    data_norm = config['data_norm']
-    t = data_norm['inp']
-    inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
-    inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
-    t = data_norm['gt']
-    gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
-    gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
+    # data_norm = config['data_norm']
+    # t = data_norm['inp']
+    # inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
+    # inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
+    # t = data_norm['gt']
+    # gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
+    # gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
         data, filename, scale = batch
@@ -111,9 +111,9 @@ def train(train_loader, model, optimizer, epoch):
 
         if config["phase"] == "train" and config["use_mixup"]:
             inp, gt = mixup(inp, gt)
-        inp_left, inp_right = torch.chunk((inp - inp_sub) / inp_div, 2, dim=-1)
-        gt_left, gt_right = torch.chunk((gt - gt_sub) / gt_div , 2, dim=-1)
-        raw_left, raw_right = torch.chunk((raw_hr - gt_sub) / gt_div , 2, dim=-1)
+        inp_left, inp_right = torch.chunk(inp, 2, dim=-1)
+        gt_left, gt_right = torch.chunk(gt, 2, dim=-1)
+        raw_left, raw_right = torch.chunk(raw_hr, 2, dim=-1)
         
         preds_left, preds_right, attention_map= model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
@@ -122,8 +122,6 @@ def train(train_loader, model, optimizer, epoch):
         mask_l2r, mask_r2l = preds_left[2], preds_right[2]
         M_l2r, M_r2l = attention_map
         
-        
-
         loss_rgb = loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right)
 
         # h, w = hr_size[0][0], hr_size[1][0]
@@ -146,7 +144,7 @@ def train(train_loader, model, optimizer, epoch):
         # loss_smooth = loss_disp_smoothness(disp_l2r, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
         lambda_loss = 0.1
-        loss = loss_rgb  +  lambda_loss * loss_photo
+        loss = loss_rgb
         # psnr = metric_fn(pred, gt)
         train_loss.add(loss.item())
         train_loss_rgb.add(loss_rgb.item())
@@ -171,11 +169,11 @@ def main(config_, save_path):
         yaml.dump(config, f, sort_keys=False)
 
     train_loader, val_loader = make_data_loaders()
-    if config.get('data_norm') is None:
-        config['data_norm'] = {
-            'inp': {'sub': [0], 'div': [1]},
-            'gt': {'sub': [0], 'div': [1]}
-        }
+    # if config.get('data_norm') is None:
+    #     config['data_norm'] = {
+    #         'inp': {'sub': [0], 'div': [1]},
+    #         'gt': {'sub': [0], 'div': [1]}
+    #     }
 
     model, optimizer, epoch_start, lr_scheduler = prepare_training()
 

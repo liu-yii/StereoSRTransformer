@@ -108,8 +108,8 @@ class NAFLTEOURS(nn.Module):
         :param device: torch device
         :return: relative pos shifts
         """
-        pos_r = torch.linspace(0, w-1, w)[None, None, None, :].to(device)  # 1 x 1 x 1 x W_right
-        pos_l = torch.linspace(0, w-1, w)[None, None, :, None].to(device)  # 1 x 1 x W_left x1
+        pos_r = torch.linspace(0, w - 1, w)[None, None, None, :].to(device)  # 1 x 1 x 1 x W_right
+        pos_l = torch.linspace(0, w - 1, w)[None, None, :, None].to(device)  # 1 x 1 x W_left x1
         pos = pos_l - pos_r
         pos[pos < 0] = 0
         return pos
@@ -312,13 +312,11 @@ class NAFLTEOURS(nn.Module):
         #         = self.encoder(self.inp_l, self.inp_r, self.cost)
         self.feat_left, self.feat_right, self.M_left_to_right, self.M_right_to_left \
             = self.encoder(x)
-        # self.M_right_to_left = torch.softmax(self.M_right_to_left, dim=-1)    # b,h,w_l,w_r
-        # self.M_left_to_right = torch.softmax(self.M_left_to_right, dim=-1)    # b,h,w_r,w_l
         
         #  self.disp_r2l, self.disp_l2r = self.gen_initial_disp(self.M_right_to_left, self.M_left_to_right)
         attn_mask = self._generate_square_subsequent_mask(w).to(x_left.device)  # generate attn mask
         masked_M_right_to_left = self.M_right_to_left + attn_mask[None, None, ...] 
-        masked_M_left_to_right = self.M_left_to_right + attn_mask[None, None, ...].permute(0,1,3,2)  
+        masked_M_left_to_right = self.M_left_to_right + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
         ######################################## Winner Takes ALL #########################################################
         out_l2r = self.regress_disp(masked_M_right_to_left, self.inp_l)
         out_r2l = self.regress_disp(masked_M_left_to_right, self.inp_r, mode='r2l')

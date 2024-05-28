@@ -14,6 +14,44 @@ from basicsr.metrics.metric_util import reorder_image, to_y_channel
 from skimage.metrics import structural_similarity
 import cv2
 
+from torchvision import transforms
+
+__imagenet_stats = {'mean': [0.485, 0.456, 0.406],
+                    'std': [0.229, 0.224, 0.225]}
+IMG_EXTENSIONS = [
+    '.jpg', '.JPG', '.jpeg', '.JPEG',
+    '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
+]
+
+def resize_fn(img, size):
+    ### normalize and resize
+    transformer = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize(size),
+        transforms.ToTensor(),
+        transforms.Normalize(__imagenet_stats['mean'], __imagenet_stats['std'])
+    ])
+    return transformer(img)
+
+def denormalize(img):
+    """
+    De-normalize a tensor and return img
+
+    :param img: normalized image, [C,H,W]
+    :return: original image, [H,W,C]
+    """
+
+    if isinstance(img, torch.Tensor):
+        img = img.permute(1, 2, 0)  # H,W,C
+        img *= torch.tensor(__imagenet_stats['std'])
+        img += torch.tensor(__imagenet_stats['mean'])
+        return img.numpy()
+    else:
+        img = img.transpose(1, 2, 0)  # H,W,C
+        img *= np.array(__imagenet_stats['std'])
+        img += np.array(__imagenet_stats['mean'])
+        return img
+
 class NestedTensor(object):
     def __init__(self, left, right, disp=None, sampled_cols=None, sampled_rows=None, occ_mask=None,
                  occ_mask_right=None):
