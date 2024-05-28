@@ -22,9 +22,9 @@ import time
 
 
 
-def batched_predict(model, inp_left, inp_right, coord, cell, bsize):
+def batched_predict(model, inp_left, inp_right, coord, cell, bsize, scale):
     with torch.no_grad():
-        model.gen_feat(inp_left, inp_right)
+        model.gen_feat(inp_left, inp_right, scale)
         n = coord.shape[1]
         ql = 0
         preds_left = []
@@ -81,7 +81,8 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
 
     pbar = tqdm(loader, leave=False, desc='val')
     for batch in pbar:
-        data, filename, raw_hr = batch
+        data, filename, scale = batch
+        scale = scale[0].item()
         for k, v in data.items():
             data[k] = v.cuda()
         filename = filename[0].split('.')[0]
@@ -94,12 +95,12 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         start_time = time.time()    
         if eval_bsize is None:
             with torch.no_grad():
-                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell)
+                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell, scale)
         else:
             if fast:
-                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1))
+                preds_left, preds_right, _, _ = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1), scale)
             else:
-                preds_left, preds_right = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize) # cell clip for extrapolation
+                preds_left, preds_right = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize, scale) # cell clip for extrapolation
         infer_time = time.time()-start_time
         
         pred_left, pred_right = preds_left[0], preds_right[0]
