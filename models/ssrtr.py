@@ -974,4 +974,4 @@ def make_ssrtr(img_size = 48, patch_size=1, in_chans=3,
     use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv'):
     
     # args = Namespace()
-    return StereoIR(img_size=[24,96], window_size=8, ape=True)
+    return StereoIR(img_size=[24,96], window_size=8)
