@@ -29,7 +29,7 @@
                 "--config",
                 "configs/test/test-flickr-2.yaml",
                 "--model",
-                "save/ssrtr-lte_2024-05-16/epoch-last.pth",
+                "save/ssrtr-lte_2024-05-27/epoch-last.pth",
                 "--gpu",
                 "0"
             ]

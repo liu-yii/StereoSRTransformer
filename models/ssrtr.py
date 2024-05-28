@@ -938,7 +938,7 @@ class StereoIR(nn.Module):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
-            x = x + self.absolute_pos_embed
+            x = x # + self.absolute_pos_embed
         x = self.pos_drop(x)
 
         for layer in self.layers:

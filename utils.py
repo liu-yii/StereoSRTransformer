@@ -42,10 +42,10 @@ def denormalize(img):
     """
 
     if isinstance(img, torch.Tensor):
-        img = img.permute(1, 2, 0)  # H,W,C
-        img *= torch.tensor(__imagenet_stats['std'])
-        img += torch.tensor(__imagenet_stats['mean'])
-        return img.numpy()
+        # img = img.permute(1, 2, 0)  # H,W,C
+        img *= torch.tensor(__imagenet_stats['std']).to(img.device)
+        img += torch.tensor(__imagenet_stats['mean']).to(img.device)
+        return img
     else:
         img = img.transpose(1, 2, 0)  # H,W,C
         img *= np.array(__imagenet_stats['std'])
