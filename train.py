@@ -117,7 +117,7 @@ def train(train_loader, model, optimizer, epoch):
         
         preds_left, preds_right, attention_map= model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
-        pred_left, pred_right = preds_left[0], preds_right[0]
+        pred_left, pred_right = denormalize(preds_left[0]), denormalize(preds_right[0])
         disp_l2r, disp_r2l = preds_left[1], preds_right[1]
         mask_l2r, mask_r2l = preds_left[2], preds_right[2]
         M_l2r, M_r2l = attention_map

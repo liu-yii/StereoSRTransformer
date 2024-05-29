@@ -12,21 +12,6 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 # from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from einops import rearrange, repeat
 
-def M_Relax(M, num_pixels):
-    _, u, v = M.shape
-    M_list = []
-    M_list.append(M.unsqueeze(1))
-    for i in range(num_pixels):
-        pad = nn.ZeroPad2d(padding=(0, 0, i+1, 0))
-        pad_M = pad(M[:, :-1-i, :])
-        M_list.append(pad_M.unsqueeze(1))
-    for i in range(num_pixels):
-        pad = nn.ZeroPad2d(padding=(0, 0, 0, i+1))
-        pad_M = pad(M[:, i+1:, :])
-        M_list.append(pad_M.unsqueeze(1))
-    M_relaxed = torch.sum(torch.cat(M_list, 1), dim=1)
-    return M_relaxed
-
 class CALayer(nn.Module):
     def __init__(self, channel, reduction):
         super(CALayer, self).__init__()
@@ -235,7 +220,7 @@ class SCAM(nn.Module):
         self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x_l, x_r, cost):
+    def forward(self, x_l, x_r):
         b, c, h, w = x_l.shape
         Q_l = self.l_proj1(self.norm_l(x_l)).permute(0, 2, 3, 1)  # B, H, Wl, c
         Q_r_T = self.r_proj1(self.norm_r(x_r)).permute(0, 2, 1, 3) # B, H, c, Wr (transposed)
@@ -249,12 +234,13 @@ class SCAM(nn.Module):
         F_r2l = torch.matmul(torch.softmax(attention, dim=-1), V_r)  #B, H, Wl, c
         F_l2r = torch.matmul(torch.softmax(attention.permute(0, 1, 3, 2), dim=-1), V_l) #B, H, Wr, c
         
-        cost[0] += attention.contiguous()
-        cost[1] += attention.contiguous().permute(0, 1, 3, 2)   
+        raw_attn = {}
+        raw_attn['r2l'] = attention.contiguous()
+        raw_attn['l2r'] = attention.permute(0, 1, 3, 2).contiguous()
         # scale
         F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
         F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
-        return x_l + F_r2l, x_r + F_l2r, cost
+        return x_l + F_r2l, x_r + F_l2r, raw_attn
 
 class DropModule(nn.Module):
     def __init__(self, drop_rate, module):
@@ -283,17 +269,17 @@ class NAFBlockSR(nn.Module):
         self.blk = NAFBlock(c, drop_out_rate=drop_out_rate).cuda()
         self.fusion = SCAM(c).cuda() if fusion else None
 
-    def forward(self, x_left, x_right, cost):
+    def forward(self, x_left, x_right):
         feat_left = self.blk(x_left)
         feat_right = self.blk(x_right)
 
         if self.fusion:
-            feat_left, feat_right, cost = self.fusion(feat_left, feat_right, cost)
+            feat_left, feat_right, attn = self.fusion(feat_left, feat_right)
 
         # feats = tuple([self.blk(x) for x in feats])
         # if self.fusion:
         #     feats = self.fusion(*feats)
-        return feat_left, feat_right, cost
+        return feat_left, feat_right, attn
 
 class NAFNetSR(nn.Module):
     '''
@@ -328,47 +314,21 @@ class NAFNetSR(nn.Module):
         else:
             self.out_dim = 3
 
-    def forward(self, x_left, x_right, cost):
-        x_size = (x_left.shape[2], x_left.shape[3])
-        feat_left = self.intro(x_left)
-        feat_right = self.intro(x_right)
+    def forward(self, x):
+        x_size = (x.shape[2], x.shape[3])
+        feat = self.intro(x)
+        feat_left, feat_right = feat.chunk(2, dim=0)
         shallow_feat_l, shallow_feat_r = feat_left, feat_right
         b, c, h, w = feat_left.shape
 
         for i in range(len(self.body)):
-            feat_left, feat_right, cost = self.body[i](feat_left, feat_right, cost)
+            feat_left, feat_right, attn = self.body[i](feat_left, feat_right)
         
         feat_left = feat_left + shallow_feat_l
         feat_right = feat_right + shallow_feat_r
 
-        M_right_to_left = self.softmax(cost[0])                                  # (B*H) * Wl * Wr
-        M_left_to_right = self.softmax(cost[1])                                  # (B*H) * Wr * Wl
-
-        # M_right_to_left_relaxed = M_Relax(M_right_to_left, num_pixels=2)
-        # V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
-        #                    M_left_to_right.permute(0, 2, 1).contiguous().view(-1, w).unsqueeze(2)
-        #                    ).detach().contiguous().view(b, 1, h, w)  # (B*H*Wr) * Wl * 1
-        # M_left_to_right_relaxed = M_Relax(M_left_to_right, num_pixels=2)
-        # V_right = torch.bmm(M_left_to_right_relaxed.contiguous().view(-1, w).unsqueeze(1),  # (B*H*Wl) * 1 * Wr
-        #                     M_right_to_left.permute(0, 2, 1).contiguous().view(-1, w).unsqueeze(2)
-        #                           ).detach().contiguous().view(b, 1, h, w)   # (B*H*Wr) * Wl * 1
-
-        # V_left_tanh = torch.tanh(5 * V_left)
-        # V_right_tanh = torch.tanh(5 * V_right)
-
-        # x_leftT = torch.bmm(M_right_to_left, feat_left.permute(0, 2, 3, 1).contiguous().view(-1, w, c)
-        #                     ).contiguous().view(b, h, w, c).permute(0, 3, 1, 2)                           #  B, C0, H0, W0
-        # x_rightT = torch.bmm(M_left_to_right, feat_right.permute(0, 2, 3, 1).contiguous().view(-1, w, c)
-        #                     ).contiguous().view(b, h, w, c).permute(0, 3, 1, 2)                              #  B, C0, H0, W0
-        # out_left = feat_left * (1 - V_left_tanh.repeat(1, c, 1, 1)) + x_leftT * V_left_tanh.repeat(1, c, 1, 1)
-        # out_right = feat_left * (1 - V_right_tanh.repeat(1, c, 1, 1)) +  x_rightT * V_right_tanh.repeat(1, c, 1, 1)
-
-        # index = torch.arange(w).view(1, 1, 1, w).to(M_right_to_left.device).float()    # index: 1*1*1*w
-        # disp1 = torch.sum(M_right_to_left * index, dim=-1).view(b, 1, h, w) # x axis of the corresponding point
-        # disp2 = torch.sum(M_left_to_right * index, dim=-1).view(b, 1, h, w)
-
-        # out_left = self.CALayer(feat_left + self.resblock(out_left - feat_left))
-        # out_right = self.CALayer(feat_right + self.resblock(out_right - feat_right))
+        M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
+        M_left_to_right = attn['l2r']                               # (B*H) * Wr * Wl
         
         return feat_left, feat_right, M_left_to_right, M_right_to_left
 

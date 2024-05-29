@@ -105,9 +105,9 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         
         pred_left, pred_right = preds_left[0], preds_right[0]
         disp_l2r, disp_r2l = preds_left[1], preds_right[1]
-        pred_left = denormalize(pred_left.view(int(scale*h), int(scale*w), 3))
+        pred_left = denormalize(pred_left)
         pred_left.clamp_(0, 1)
-        pred_right = denormalize(pred_right.view(int(scale*h), int(scale*w), 3))
+        pred_right = denormalize(pred_right)
         pred_right.clamp_(0, 1)
         
         # for i, pred in enumerate([pred_left, pred_right]):   
@@ -126,8 +126,8 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         #     img.save(f'{save_dir}/{filename}_disp.png')
         if save_dir != None:
             save_imgs = {
-                        f'{save_dir}/{filename}_L.png': pred_left,
-                        f'{save_dir}/{filename}_R.png': pred_right,
+                        f'{save_dir}/{filename}_L.png': pred_left.view(int(scale*h), int(scale*w), 3),
+                        f'{save_dir}/{filename}_R.png': pred_right.view(int(scale*h), int(scale*w), 3),
                         f'{save_dir}/{filename}_disp.png': disp_l2r.view(int(scale*h), int(scale*w), 1)
                     }
             for path, img in save_imgs.items():

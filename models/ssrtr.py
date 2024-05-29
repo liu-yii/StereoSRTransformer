@@ -816,16 +816,18 @@ class StereoIR(nn.Module):
         resi_connection: The convolutional block before residual connection. '1conv'/'3conv'
     """
 
-    def __init__(self, img_size=64, patch_size=1, in_chans=3,
-                 embed_dim=96, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
-                 window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+    def __init__(self, img_size=[24, 96], patch_size=1, in_chans=3,
+                 embed_dim=180, depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
+                 window_size=8, mlp_ratio=2., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-                 use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv',
+                 use_checkpoint=False, upscale=2, img_range=1., upsampler='none', resi_connection='1conv',
                  **kwargs):
         super(StereoIR, self).__init__()
         num_in_ch = in_chans
         self.img_range = img_range
+        num_feat = 64
+        num_out_ch = in_chans
         if in_chans == 3:
             rgb_mean = (0.4488, 0.4371, 0.4040)
             self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
@@ -847,7 +849,7 @@ class StereoIR(nn.Module):
         self.patch_norm = patch_norm
         self.num_features = embed_dim
         self.mlp_ratio = mlp_ratio
-        self.out_dim = embed_dim
+        self.out_dim = num_feat
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -907,6 +909,34 @@ class StereoIR(nn.Module):
                                                  nn.Conv2d(embed_dim // 4, embed_dim // 4, 1, 1, 0),
                                                  nn.LeakyReLU(negative_slope=0.2, inplace=True),
                                                  nn.Conv2d(embed_dim // 4, embed_dim, 3, 1, 1))
+         #####################################################################################################
+        ################################ 3, high quality image reconstruction ################################
+        if self.upsampler == 'none':
+            self.conv_before_upsample = nn.Sequential(nn.Conv2d(embed_dim, num_feat, 3, 1, 1),
+                                                      nn.LeakyReLU(inplace=True))        
+        elif self.upsampler == 'pixelshuffle':
+            # for classical SR
+            self.conv_before_upsample = nn.Sequential(nn.Conv2d(embed_dim, num_feat, 3, 1, 1),
+                                                      nn.LeakyReLU(inplace=True))
+            self.upsample = Upsample(upscale, num_feat)
+            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+        elif self.upsampler == 'pixelshuffledirect':
+            # for lightweight SR (to save parameters)
+            self.upsample = UpsampleOneStep(upscale, embed_dim, num_out_ch,
+                                            (patches_resolution[0], patches_resolution[1]))
+        elif self.upsampler == 'nearest+conv':
+            # for real-world SR (less artifacts)
+            assert self.upscale == 4, 'only support x4 now.'
+            self.conv_before_upsample = nn.Sequential(nn.Conv2d(embed_dim, num_feat, 3, 1, 1),
+                                                      nn.LeakyReLU(inplace=True))
+            self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+            self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        else:
+            # for image denoising and JPEG compression artifact reduction
+            self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
 
         self.apply(self._init_weights)
 
@@ -938,7 +968,7 @@ class StereoIR(nn.Module):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
-            x = x # + self.absolute_pos_embed
+            x = x  + self.absolute_pos_embed
         x = self.pos_drop(x)
 
         for layer in self.layers:
@@ -954,24 +984,53 @@ class StereoIR(nn.Module):
         # x: 2B,C,H,W
         H, W = x.shape[2:]
         x = self.check_image_size(x)
-        x = self.conv_first(x)
-        feat, attn = self.forward_features(x)
+
+        if self.upsampler == 'none':
+            x = self.conv_first(x)
+            x1, attn = self.forward_features(x)
+            x = self.conv_after_body(x1) + x
+            x = self.conv_before_upsample(x)
+        elif self.upsampler == 'pixelshuffle':
+            # for classical SR
+            x = self.conv_first(x)
+            x1, attn = self.forward_features(x)
+            x = self.conv_after_body(x1) + x
+            x = self.conv_before_upsample(x)
+            x = self.conv_last(self.upsample(x))
+        elif self.upsampler == 'pixelshuffledirect':
+            # for lightweight SR
+            x = self.conv_first(x)
+            x1, attn = self.forward_features(x)
+            x = self.conv_after_body(x1) + x
+            x = self.upsample(x)
+        elif self.upsampler == 'nearest+conv':
+            # for real-world SR
+            x = self.conv_first(x)
+            x1, attn = self.forward_features(x)
+            x = self.conv_after_body(x1) + x
+            x = self.conv_before_upsample(x)
+            x = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
+            x = self.lrelu(self.conv_up2(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
+            x = self.conv_last(self.lrelu(self.conv_hr(x)))
+        else:
+            # for image denoising and JPEG compression artifact reduction
+            x_first = self.conv_first(x)
+            x1, attn = self.forward_features(x_first)
+            res = self.conv_after_body(x1) + x_first
+            x = x + self.conv_last(res)
         
-        feat = self.conv_after_body(feat) + x
-        feat_left, feat_right = feat.chunk(2, dim=0)
-        
+        feat_left, feat_right = x.chunk(2, dim=0)
         M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
         M_left_to_right = attn['l2r']                  
         return feat_left, feat_right, M_left_to_right, M_right_to_left
 
 
 @register('ssrtr')
-def make_ssrtr(img_size = 48, patch_size=1, in_chans=3,
-    hidden_dim=96, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
-    window_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
-    drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
-    norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-    use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv'):
+def make_ssrtr(img_size=[24,96],
+               window_size=8,
+               embed_dim=180,
+               depths=[6,6,6,6,6,6],
+               num_heads=[6,6,6,6,6,6]):
     
     # args = Namespace()
-    return StereoIR(img_size=[24,96], window_size=8)
+    return StereoIR()

@@ -2,35 +2,35 @@ train_dataset:
   dataset:
     name: stereo-image-folders
     args:
-      # root_path: /media/yi/E/Research/Datasets/Flickr1024/Train
-      root_path: E:/Research/Datasets/Flickr1024/Train
+      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/val/processed
+      root_path: E:/Research/Datasets/iPASSR/train/processed
       repeat: 20
       cache: in_memory
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: 48
+      inp_size: [24, 96]
       scale_max: 4
       augment: true
       sample_q: 2304
-  batch_size: 16
+  batch_size: 12
 
 val_dataset:
   dataset:
     name: stereo-image-folders
     args:
-      # root_path: /media/yi/E/Research/Datasets/Flickr1024/Validation
-      root_path: E:/Research/Datasets/Flickr1024/Validation
-      first_k: 10
+      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/val/processed
+      root_path: E:/Research/Datasets/iPASSR/val/processed
+      first_k: 20
       repeat: 160
       cache: in_memory
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: 48
+      inp_size: [24, 96]
       scale_max: 4
       sample_q: 2304
-  batch_size: 16
+  batch_size: 12
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}
@@ -44,12 +44,18 @@ model:
       args:
         dual: true
         no_upsampling: true
-        width: 64
-        num_blks: 32
+        width: 48
+        num_blks: 16
+        fusion_to: 16
     imnet_spec:
       name: mlp
       args:
         out_dim: 3
+        hidden_list: [256, 256, 256]
+    dispnet_spec:
+      name: mlp
+      args:
+        out_dim: 2
         hidden_list: [256, 256, 256]
     pb_spec:
       name: posenc
@@ -69,9 +75,9 @@ epoch_max: 1000
 cosine_annealing:
   eta_min: 1.e-7
 
-  
-
-epoch_val: 5
+use_mixup: true
+phase: "train"
+epoch_val: 1
 epoch_save: 100
 save_dir: "results"
 

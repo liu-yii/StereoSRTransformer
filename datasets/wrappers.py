@@ -396,8 +396,8 @@ class SRImplicitStereo(Dataset):
                 # SwinIR Evaluation - reflection padding
                 # batch size : 1 for testing
                 # h_old, w_old = imgl.shape[-2:]
-                h_pad = (h_lr // self.window_size + 1) * self.window_size - h_lr
-                w_pad = (w_lr // self.window_size + 1) * self.window_size - w_lr
+                h_pad = np.floor(h_lr * 1.0 / self.window_size) * self.window_size - h_lr
+                w_pad = np.floor(w_lr * 1.0 / self.window_size) * self.window_size - w_lr
                 h_lr += h_pad
                 w_lr += w_pad
                 imgl = torch.cat([imgl, torch.flip(imgl, [1])], 1)[..., :round(h_lr * s), :]
@@ -406,10 +406,10 @@ class SRImplicitStereo(Dataset):
                 imgr = torch.cat([imgr, torch.flip(imgr, [2])], 2)[..., :round(w_lr * s)]
             w_hr = round(w_lr * s)
             h_hr = round(h_lr * s)
-            imgl = imgl[:, :round(h_lr * s), :round(w_lr * s)] # assume round int
+            imgl = imgl[:, :h_hr, :w_hr] # assume round int
             imgl_down = resize_fn(imgl, (h_lr, w_lr))
             cropl_lr, cropl_hr = imgl_down, imgl
-            imgr = imgr[:, :round(h_lr * s), :round(w_lr * s)] # assume round int
+            imgr = imgr[:, :h_hr, :w_hr] # assume round int
             imgr_down = resize_fn(imgr, (h_lr, w_lr))
             cropr_lr, cropr_hr = imgr_down, imgr
         else:
@@ -459,9 +459,9 @@ class SRImplicitStereo(Dataset):
         cell = torch.ones_like(hr_coord)
         cell[:, 0] *= 2 / cropl_hr.shape[-2]
         cell[:, 1] *= 2 / cropl_hr.shape[-1]
-        crop_lr = torch.cat([cropl_lr,cropr_lr],dim=-1)  #[3,H,2W]
-        hr_rgb = torch.cat([hrl_rgb, hrr_rgb],dim=-1)    #[2304,6]
-        raw_hr = torch.cat([raw_hrl, raw_hrr],dim=-1)    #[h_max*w_max, 10]
+        crop_lr = torch.cat([cropl_lr,cropr_lr], dim=-1)  #[3,H,2W]
+        hr_rgb = torch.cat([hrl_rgb, hrr_rgb], dim=-1)    #[2304,6]
+        raw_hr = torch.cat([raw_hrl, raw_hrr], dim=-1)    #[h_max*w_max, 10]
         return {
             'inp': crop_lr,
             'coord': hr_coord,

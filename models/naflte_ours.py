@@ -315,8 +315,8 @@ class NAFLTEOURS(nn.Module):
         
         #  self.disp_r2l, self.disp_l2r = self.gen_initial_disp(self.M_right_to_left, self.M_left_to_right)
         attn_mask = self._generate_square_subsequent_mask(w).to(x_left.device)  # generate attn mask
-        masked_M_right_to_left = self.M_right_to_left + attn_mask[None, None, ...] 
-        masked_M_left_to_right = self.M_left_to_right + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
+        masked_M_right_to_left = self.M_right_to_left  + attn_mask[None, None, ...] 
+        masked_M_left_to_right = self.M_left_to_right  + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
         ######################################## Winner Takes ALL #########################################################
         out_l2r = self.regress_disp(masked_M_right_to_left, self.inp_l)
         out_r2l = self.regress_disp(masked_M_left_to_right, self.inp_r, mode='r2l')
