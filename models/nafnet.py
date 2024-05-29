@@ -295,7 +295,6 @@ class NAFNetSR(nn.Module):
         self.num_blks = args.num_blks
         self.intro = nn.Conv2d(in_channels=args.img_channel, out_channels=args.width, kernel_size=3, padding=1, stride=1, groups=1,
                               bias=True)
-        # self.transition = RDG(G0=args.width, C=4, G=24, n_RDB=4)
         for i in range(self.num_blks):
             self.body.append(
                 DropModule(
