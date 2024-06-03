@@ -55,7 +55,7 @@ model:
     dispnet_spec:
       name: mlp
       args:
-        out_dim: 2
+        out_dim: 1
         hidden_list: [256, 256, 256]
     pb_spec:
       name: posenc

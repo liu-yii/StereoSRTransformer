@@ -68,7 +68,7 @@ class NAFLTEOURS(nn.Module):
         self.softmax_scale = 1
         self.feat_unfold = True
         self.local_attn = True
-        self.ot = True
+        self.ot = False
         self.phi = nn.Parameter(torch.tensor(0.0, requires_grad=True))  # dustbin cost
 
         # self.grad_nopad = Get_gradient_nopadding()
@@ -80,7 +80,7 @@ class NAFLTEOURS(nn.Module):
         # self.norm_r = LayerNorm2d(self.encoder.out_dim)
         self.coef = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
         self.freq = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
-        self.conv0 = nn.Conv2d(2 + 3, hidden_dim, 3, padding=1)
+        self.conv0 = nn.Conv2d(1 + 3, hidden_dim, 3, padding=1)
         
         self.phase = nn.Linear(2, hidden_dim, bias=False)
         self.imnet = models.make(imnet_spec, args={'in_dim': hidden_dim})
@@ -361,11 +361,10 @@ class NAFLTEOURS(nn.Module):
         std_disp_pred = self.disp1.std() + eps
         disp_pred_normalized = (self.disp1 - mean_disp_pred) / std_disp_pred
 
-        # normalize occlusion mask
-        occ_pred_normalized = (self.occ_left - 0.5) / 0.5
+        
         # feat_d = torch.cat((self.feat_left, self.disp_l2r), dim=1)
 
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized, self.inp_l), dim=1))
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_l), dim=1))
 
         # feat = torch.cat((feat, self.disp_l2r), dim=1)
         # feat = self.feat_left
@@ -452,14 +451,16 @@ class NAFLTEOURS(nn.Module):
         rgb = ret + F.grid_sample(self.inp_l, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp_l2r_h = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        disp1_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        mask_l2r_h = self.occ_head(ret_disp[:,:,1].unsqueeze(-1))
-        disp_l2r_h = disp_l2r_h * std_disp_pred + mean_disp_pred
+        mask1_hr = F.grid_sample(self.occ_left, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+                      padding_mode='border', align_corners=False)[:, :, 0, :] \
+                      .permute(0, 2, 1)
+        disp1_hr = disp1_hr * std_disp_pred + mean_disp_pred
         
 
-        return rgb, disp_l2r_h, mask_l2r_h
+        return rgb, disp1_hr, mask1_hr
     
     def query_rgb_right(self, coord, cell=None):
         
@@ -473,10 +474,9 @@ class NAFLTEOURS(nn.Module):
         mean_disp_pred = self.disp2.mean()
         std_disp_pred = self.disp2.std() + eps
         disp_pred_normalized = (self.disp2 - mean_disp_pred) / std_disp_pred
-        # normalize occlusion mask
-        occ_pred_normalized = (self.occ_left - 0.5) / 0.5
+        
 
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized, self.inp_r), dim=1))
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_r), dim=1))
         # feat = self.feat_right
         # feat = torch.cat((feat, self.disp_r2l), dim=1)
         # key pos
@@ -564,10 +564,12 @@ class NAFLTEOURS(nn.Module):
         rgb = ret + F.grid_sample(self.inp_r, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp2_hr = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(self.disp2, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        disp2_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        mask2_hr = self.occ_head(ret_disp[:,:,1].unsqueeze(-1))
+        mask2_hr = F.grid_sample(self.occ_right, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+                      padding_mode='border', align_corners=False)[:, :, 0, :] \
+                      .permute(0, 2, 1)
         disp2_hr = disp2_hr * std_disp_pred + mean_disp_pred
         
         return rgb, disp2_hr, mask2_hr

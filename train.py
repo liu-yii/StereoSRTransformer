@@ -144,7 +144,7 @@ def train(train_loader, model, optimizer, epoch):
         #     loss_fn(right_warp_warp, gt_right)
         # loss_smooth = loss_disp_smoothness(disp_l2r, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
-        lambda_loss = 0.0
+        lambda_loss = 0.1
         loss = loss_rgb + lambda_loss * loss_photo
         # psnr = metric_fn(pred, gt)
         train_loss.add(loss.item())
