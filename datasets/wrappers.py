@@ -404,6 +404,7 @@ class SRImplicitStereo(Dataset):
                 imgl = torch.cat([imgl, torch.flip(imgl, [2])], 2)[..., :round(w_lr * s)]
                 imgr = torch.cat([imgr, torch.flip(imgr, [1])], 1)[..., :round(h_lr * s), :]
                 imgr = torch.cat([imgr, torch.flip(imgr, [2])], 2)[..., :round(w_lr * s)]
+            h_lr, w_lr = int(h_lr), int(w_lr)
             w_hr = round(w_lr * s)
             h_hr = round(h_lr * s)
             imgl = imgl[:, :h_hr, :w_hr] # assume round int

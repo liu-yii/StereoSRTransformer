@@ -80,11 +80,12 @@ class NAFLTEOURS(nn.Module):
         # self.norm_r = LayerNorm2d(self.encoder.out_dim)
         self.coef = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
         self.freq = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
-        self.conv0 = nn.Conv2d(2, hidden_dim, 3, padding=1)
+        self.conv0 = nn.Conv2d(2 + 3, hidden_dim, 3, padding=1)
         
         self.phase = nn.Linear(2, hidden_dim, bias=False)
         self.imnet = models.make(imnet_spec, args={'in_dim': hidden_dim})
         self.dispnet = models.make(dispnet_spec, args={'in_dim': hidden_dim})
+        self.occ_head = nn.Sigmoid()
         self.pe = PositionEncoder(posenc_type='sinusoid',complex_transform=False, enc_dims=hidden_dim, hidden_dims=hidden_dim//2)
 
     @torch.no_grad()
@@ -227,8 +228,8 @@ class NAFLTEOURS(nn.Module):
         occ_pred = 1.0 - matched_attn
         return occ_pred.squeeze(-1)
     
-    def regress_disp(self, attn_weight: Tensor, x: Tensor, sampled_cols: Tensor = None, sampled_rows: Tensor = None, \
-                     occ_mask: Tensor = None, occ_mask_right: Tensor = None, mode='l2r'):
+    def regress_disp(self, attn_weight: Tensor, sampled_cols: Tensor = None, sampled_rows: Tensor = None, \
+                     occ_mask: Tensor = None, occ_mask_right: Tensor = None, mode='r2l'):
         """
         Regression head follows steps of
             - compute scale for disparity (if there is downsampling)
@@ -241,11 +242,11 @@ class NAFLTEOURS(nn.Module):
         :param x: input data
         :return: dictionary of predicted values
         """
-        bs, _, h, w = x.shape
+        # bs, _, h, w = x.shape
         output = {}
 
         # compute scale
-        scale = 1.0
+        # scale = 1.0
 
         # normalize attention to 0-1
         if self.ot:
@@ -254,7 +255,7 @@ class NAFLTEOURS(nn.Module):
         else:
             # softmax
             attn_ot = self._softmax(attn_weight)
-
+        output['attn_ot'] = attn_ot[..., :-1, :-1]
         # compute relative response (RR) at ground truth location
         output['gt_response'] = None
 
@@ -279,7 +280,7 @@ class NAFLTEOURS(nn.Module):
 
         # regress low res disparity
         pos_shift = self._compute_unscaled_pos_shift(attn_weight.shape[2], attn_weight.device)  # NxHxW_leftxW_right
-        if mode == 'r2l':
+        if mode == 'l2r':
             pos_shift = pos_shift.permute(0, 1, 3, 2)
         disp_pred_low_res, matched_attn = self._compute_low_res_disp(pos_shift, attn_ot[..., :-1, :-1], occ_mask)
         # regress low res occlusion
@@ -310,7 +311,7 @@ class NAFLTEOURS(nn.Module):
         # self.feat_left, self.feat_right, self.disp1, self.disp2, \
         #     (self.M_right_to_left, self.M_left_to_right), (self.V_left, self.V_right) \
         #         = self.encoder(self.inp_l, self.inp_r, self.cost)
-        self.feat_left, self.feat_right, self.M_left_to_right, self.M_right_to_left \
+        self.feat_left, self.feat_right, self.M_right_to_left, self.M_left_to_right \
             = self.encoder(x)
         
         #  self.disp_r2l, self.disp_l2r = self.gen_initial_disp(self.M_right_to_left, self.M_left_to_right)
@@ -318,16 +319,17 @@ class NAFLTEOURS(nn.Module):
         masked_M_right_to_left = self.M_right_to_left  + attn_mask[None, None, ...] 
         masked_M_left_to_right = self.M_left_to_right  + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
         ######################################## Winner Takes ALL #########################################################
-        out_l2r = self.regress_disp(masked_M_right_to_left, self.inp_l)
-        out_r2l = self.regress_disp(masked_M_left_to_right, self.inp_r, mode='r2l')
-        self.disp_l2r, self.occ_left = out_l2r['disp_pred'].unsqueeze(1), out_l2r['occ_pred'].unsqueeze(1)
-        self.disp_r2l, self.occ_right = out_r2l['disp_pred'].unsqueeze(1), out_r2l['occ_pred'].unsqueeze(1)
+        out_1 = self.regress_disp(masked_M_right_to_left)
+        out_2 = self.regress_disp(masked_M_left_to_right, mode='l2r')
+        self.disp1, self.occ_left = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
+        self.disp2, self.occ_right = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
+        self.M_right_to_left, self.M_left_to_right = out_1['attn_ot'], out_2['attn_ot']
         ######################################## disp norm #########################################################
         # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
         # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
 
-        self.disp_l2r = self.disp_l2r * scale
-        self.disp_r2l = self.disp_r2l * scale
+        self.disp1 = self.disp1 * scale
+        self.disp2 = self.disp2 * scale
 
         # ######################################## valid mask #########################################################
         # M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
@@ -355,14 +357,15 @@ class NAFLTEOURS(nn.Module):
         feat = torch.cat((self.feat_left, feat_leftW), dim=1)
 
         eps = 1e-6
-        mean_disp_pred = self.disp_l2r.mean()
-        std_disp_pred = self.disp_l2r.std() + eps
-        disp_pred_normalized = (self.disp_l2r - mean_disp_pred) / std_disp_pred
+        mean_disp_pred = self.disp1.mean()
+        std_disp_pred = self.disp1.std() + eps
+        disp_pred_normalized = (self.disp1 - mean_disp_pred) / std_disp_pred
 
         # normalize occlusion mask
         occ_pred_normalized = (self.occ_left - 0.5) / 0.5
         # feat_d = torch.cat((self.feat_left, self.disp_l2r), dim=1)
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized), dim=1))
+
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized, self.inp_l), dim=1))
 
         # feat = torch.cat((feat, self.disp_l2r), dim=1)
         # feat = self.feat_left
@@ -452,10 +455,9 @@ class NAFLTEOURS(nn.Module):
         disp_l2r_h = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        mask_l2r_h = ret_disp[:,:,1].unsqueeze(-1) + F.grid_sample(occ_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
+        mask_l2r_h = self.occ_head(ret_disp[:,:,1].unsqueeze(-1))
         disp_l2r_h = disp_l2r_h * std_disp_pred + mean_disp_pred
+        
 
         return rgb, disp_l2r_h, mask_l2r_h
     
@@ -468,13 +470,13 @@ class NAFLTEOURS(nn.Module):
         # feat = self.feat_right + feat_rightW
         # feat_d = torch.cat((self.feat_right, self.disp_r2l), dim=1)
         eps = 1e-6
-        mean_disp_pred = self.disp_r2l.mean()
-        std_disp_pred = self.disp_r2l.std() + eps
-        disp_pred_normalized = (self.disp_r2l - mean_disp_pred) / std_disp_pred
+        mean_disp_pred = self.disp2.mean()
+        std_disp_pred = self.disp2.std() + eps
+        disp_pred_normalized = (self.disp2 - mean_disp_pred) / std_disp_pred
         # normalize occlusion mask
         occ_pred_normalized = (self.occ_left - 0.5) / 0.5
 
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized), dim=1))
+        feat_d = self.conv0(torch.cat((disp_pred_normalized, occ_pred_normalized, self.inp_r), dim=1))
         # feat = self.feat_right
         # feat = torch.cat((feat, self.disp_r2l), dim=1)
         # key pos
@@ -562,15 +564,13 @@ class NAFLTEOURS(nn.Module):
         rgb = ret + F.grid_sample(self.inp_r, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp_r2l_h = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(self.disp_r2l, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        disp2_hr = ret_disp[:,:,0].unsqueeze(-1) + F.grid_sample(self.disp2, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        mask_r2l_h = ret_disp[:,:,1].unsqueeze(-1) + F.grid_sample(self.occ_right, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
-        disp_r2l_h = disp_r2l_h * std_disp_pred + mean_disp_pred
+        mask2_hr = self.occ_head(ret_disp[:,:,1].unsqueeze(-1))
+        disp2_hr = disp2_hr * std_disp_pred + mean_disp_pred
         
-        return rgb, disp_r2l_h, mask_r2l_h
+        return rgb, disp2_hr, mask2_hr
     
 
     def forward(self, inp_left, inp_right, coord, cell, scale):

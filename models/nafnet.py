@@ -214,8 +214,8 @@ class SCAM(nn.Module):
         self.l_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         
-        self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
-        self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+        self.beta = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
+        self.gamma = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
 
         self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
@@ -230,13 +230,25 @@ class SCAM(nn.Module):
 
         # (B, H, Wl, c) x (B, H, c, Wr) -> (B, H, Wl, Wr)
         attention = torch.matmul(Q_l, Q_r_T) * self.scale
+        attentionT = attention.permute(0, 1, 3, 2)
+
+        ## select topk
+        mask1 = torch.zeros_like(attention, device=x_l.device, requires_grad=False)
+        mask2 = torch.zeros_like(attentionT, device=x_l.device, requires_grad=False)
+        index = torch.topk(attention, k=int(c/2), dim=-1, largest=True)[1]
+        indexT = torch.topk(attentionT, k=int(c/2), dim=-1, largest=True)[1]
+        mask1.scatter_(-1, index, 1.)
+        mask2.scatter_(-1, indexT, 1.)
+        attention = torch.where(mask1 > 0, attention, torch.full_like(attention, float('-inf')))
+        attentionT = torch.where(mask2 > 0, attentionT, torch.full_like(attentionT, float('-inf')))
+
 
         F_r2l = torch.matmul(torch.softmax(attention, dim=-1), V_r)  #B, H, Wl, c
-        F_l2r = torch.matmul(torch.softmax(attention.permute(0, 1, 3, 2), dim=-1), V_l) #B, H, Wr, c
+        F_l2r = torch.matmul(torch.softmax(attentionT, dim=-1), V_l) #B, H, Wr, c
         
         raw_attn = {}
-        raw_attn['r2l'] = attention.contiguous()
-        raw_attn['l2r'] = attention.permute(0, 1, 3, 2).contiguous()
+        raw_attn['r2l'] = torch.softmax(attention, dim=-1).contiguous()
+        raw_attn['l2r'] = torch.softmax(attentionT, dim=-1).contiguous()
         # scale
         F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
         F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
@@ -319,20 +331,23 @@ class NAFNetSR(nn.Module):
         feat_left, feat_right = feat.chunk(2, dim=0)
         shallow_feat_l, shallow_feat_r = feat_left, feat_right
         b, c, h, w = feat_left.shape
+        cost = [
+            torch.zeros(b, h, w, w).to(x.device),
+            torch.zeros(b, h, w, w).to(x.device)
+        ]
 
         for i in range(len(self.body)):
             feat_left, feat_right, attn = self.body[i](feat_left, feat_right)
+            cost[0] = cost[0] + attn['r2l']
+            cost[1] = cost[1] + attn['l2r']
         
         feat_left = feat_left + shallow_feat_l
         feat_right = feat_right + shallow_feat_r
 
-        M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
-        M_left_to_right = attn['l2r']                               # (B*H) * Wr * Wl
+        M_right_to_left = cost[0]                           # (B*H) * Wl * Wr
+        M_left_to_right = cost[1]                             # (B*H) * Wr * Wl
         
-        return feat_left, feat_right, M_left_to_right, M_right_to_left
-
-
-
+        return feat_left, feat_right, M_right_to_left, M_left_to_right
 
 
 @register('nafnet')

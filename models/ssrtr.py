@@ -563,7 +563,7 @@ class BasicLayer(nn.Module):
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                                  norm_layer=norm_layer)
             for i in range(depth)])
-        self.cross_attn = SSCAM(c=dim)
+        # self.cross_attn = SSCAM(c=dim)
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(input_resolution, dim=dim, norm_layer=norm_layer)
@@ -573,10 +573,10 @@ class BasicLayer(nn.Module):
     def forward(self, x, x_size):
         for blk in self.blocks:
                 x = blk(x, x_size)
-        x, attn = self.cross_attn(x, x_size)
+        # x, attn = self.cross_attn(x, x_size)
         if self.downsample is not None:
             x = self.downsample(x)
-        return x, attn
+        return x
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -653,8 +653,8 @@ class RSTB(nn.Module):
             norm_layer=None)
 
     def forward(self, x, x_size):
-        res, attn = self.residual_group(x, x_size)
-        return self.patch_embed(self.conv(self.patch_unembed(res, x_size))) + x, attn
+        res = self.residual_group(x, x_size)
+        return self.patch_embed(self.conv(self.patch_unembed(res, x_size))) + x
 
     # def flops(self):
     #     flops = 0
@@ -817,7 +817,7 @@ class StereoIR(nn.Module):
     """
 
     def __init__(self, img_size=[24, 96], patch_size=1, in_chans=3,
-                 embed_dim=180, depths=[6, 6, 6, 6, 6, 6], num_heads=[6, 6, 6, 6, 6, 6],
+                 embed_dim=96, depths=[6, 6, 6, 6], num_heads=[6, 6, 6, 6],
                  window_size=8, mlp_ratio=2., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
@@ -877,6 +877,7 @@ class StereoIR(nn.Module):
 
         # build Residual Swin Transformer blocks (RSTB)
         self.layers = nn.ModuleList()
+        self.scam_layer = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = RSTB(dim=embed_dim,
                          input_resolution=(patches_resolution[0],
@@ -897,6 +898,9 @@ class StereoIR(nn.Module):
 
                          )
             self.layers.append(layer)
+            cross_attn = SSCAM(embed_dim)
+            self.scam_layer.append(cross_attn)
+
         self.norm = norm_layer(self.num_features)
 
         # build the last conv layer in deep feature extraction
@@ -966,13 +970,15 @@ class StereoIR(nn.Module):
 
     def forward_features(self, x):
         x_size = (x.shape[2], x.shape[3])
+        
         x = self.patch_embed(x)
         if self.ape:
             x = x  + self.absolute_pos_embed
         x = self.pos_drop(x)
 
-        for layer in self.layers:
-            x, attn = layer(x, x_size)
+        for i, layer in enumerate(self.layers):
+            x = layer(x, x_size)
+            x, attn = self.scam_layer[i](x, x_size)
 
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)

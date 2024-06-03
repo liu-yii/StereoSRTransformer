@@ -6,6 +6,7 @@ import shutil
 import math
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.optim import SGD, Adam
@@ -62,6 +63,7 @@ class NestedTensor(object):
         self.occ_mask_right = occ_mask_right
         self.sampled_cols = sampled_cols
         self.sampled_rows = sampled_rows
+
 
 def batched_index_select(source, dim, index):
     views = [source.shape[0]] + [1 if i != dim else -1 for i in range(1, len(source.shape))]
@@ -318,26 +320,27 @@ def warp(img, disp, img_size=None, mode='l2r'):
     output = (output * mask).view(b, -1, h*w).permute(0, 2, 1)
     return output
 
-def warp_coord(coord, disp, raw_hr, mask, mode='l2r'):
+def warp_coord(coord, disp, raw_hr, mask=None, mode='r2l'):
     '''
     Borrowed from:
     '''
-    b, _, _ = coord.shape
     b, c, h, w = raw_hr.shape
     y_disp = torch.zeros_like(disp)
-    disp = torch.cat((disp * 2.0 / w, y_disp), dim=-1)
-    if mode == 'r2l':
+    disp = torch.cat((y_disp, disp * 2.0 / w), dim=-1)
+    if mode == 'l2r':
         disp = -disp
-    coord_warp = coord + disp        # b, h*w, 2
+    coord_warp = coord - disp        # b, h*w, 2
     coord_warp = coord_warp.clamp_(-1, 1)
-    grid = coord_warp.unsqueeze(1)
+    grid = coord_warp.flip(-1).unsqueeze(1)
     # mask = torch.autograd.Variable(torch.ones(raw_hr.size())).to(raw_hr.device)
     # mask = F.grid_sample(mask, grid, mode='bilinear', padding_mode='border').permute(0, 2, 3, 1).squeeze(1)
 
-    ret = F.grid_sample(raw_hr, grid, mode='nearest', padding_mode='border').permute(0, 2, 3, 1).squeeze(1)
-    
-    output = ret
-    #  output = ret
+    ret = F.grid_sample(raw_hr, grid, mode='nearest', padding_mode='border',align_corners=False)[:, :, 0, :] \
+                    .permute(0, 2, 1)
+    if mask is not None:
+        output = ret * mask
+    else:
+        output = ret
 
     return output
 

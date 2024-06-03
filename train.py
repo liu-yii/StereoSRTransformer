@@ -115,23 +115,24 @@ def train(train_loader, model, optimizer, epoch):
         gt_left, gt_right = torch.chunk(gt, 2, dim=-1)
         raw_left, raw_right = torch.chunk(raw_hr, 2, dim=-1)
         
-        preds_left, preds_right, attention_map= model(inp_left, inp_right, data['coord'], data['cell'], scale)
+        preds_left, preds_right, _ = model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
         pred_left, pred_right = denormalize(preds_left[0]), denormalize(preds_right[0])
-        disp_l2r, disp_r2l = preds_left[1], preds_right[1]
-        mask_l2r, mask_r2l = preds_left[2], preds_right[2]
-        M_l2r, M_r2l = attention_map
+        disp1, disp2 = preds_left[1], preds_right[1]
+        mask1, mask2 = preds_left[2], preds_right[2]
+        # M_l2r, M_r2l = attention_map
         
         loss_rgb = loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right)
 
         # h, w = hr_size[0][0], hr_size[1][0]
-        right_warp = warp_coord(data['coord'], disp_l2r, raw_left, mask_l2r)
-        left_warp = warp_coord(data['coord'], disp_r2l, raw_right, mask_r2l, mode='r2l')
+        # warp_left = warp_coord(hr_coord, hrl_d, right_img)
+        warp_left = warp_coord(data['coord'], disp1, raw_right, mask1)
+        warp_right = warp_coord(data['coord'], disp2, raw_left, mask2, mode='l2r')
         # left_warp_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
         # right_warp_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
 
-        loss_photo = loss_fn(right_warp, gt_right) + \
-            loss_fn(left_warp, gt_left)
+        loss_photo = loss_fn(warp_right, gt_right) + \
+            loss_fn(warp_left, gt_left)
         
         # lr_right_warp = torch.matmul(M_l2r, inp_left.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         # lr_left_warp = torch.matmul(M_r2l, inp_right.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
@@ -143,12 +144,12 @@ def train(train_loader, model, optimizer, epoch):
         #     loss_fn(right_warp_warp, gt_right)
         # loss_smooth = loss_disp_smoothness(disp_l2r, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
-        lambda_loss = 0.1
+        lambda_loss = 0.0
         loss = loss_rgb + lambda_loss * loss_photo
         # psnr = metric_fn(pred, gt)
         train_loss.add(loss.item())
         train_loss_rgb.add(loss_rgb.item())
-        train_loss_disp.add(lambda_loss * loss_photo)
+        train_loss_disp.add(loss_photo.item())
 
         optimizer.zero_grad()
         loss.backward()
