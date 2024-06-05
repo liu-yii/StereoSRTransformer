@@ -1028,7 +1028,7 @@ class StereoIR(nn.Module):
         feat_left, feat_right = x.chunk(2, dim=0)
         M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
         M_left_to_right = attn['l2r']                  
-        return feat_left, feat_right, M_left_to_right, M_right_to_left
+        return feat_left, feat_right, M_right_to_left, M_left_to_right
 
 
 @register('ssrtr')

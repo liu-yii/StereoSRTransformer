@@ -16,45 +16,6 @@ from skimage import morphology
 import numpy as np
 import math
 
-# def get_embed_fns(max_freq):
-#     """
-#     N,bsize,1 ---> N,bsize,2n+1
-#     """
-#     embed_fns = []
-#     embed_fns.append(lambda x: torch.ones((x.shape[0], x.shape[1], 1)))  # x: N,bsize,1
-#     for i in range(1, max_freq + 1):
-#         embed_fns.append(lambda x, freq=i: math.sqrt(2) * torch.cos(x[:, :, 0] * freq).unsqueeze(-1))
-#         embed_fns.append(lambda x, freq=i: math.sqrt(2) * torch.sin(x[:, :, 0] * freq).unsqueeze(-1))
-#     return embed_fns
-
-# class OPE(nn.Module):
-#     def __init__(self, max_freq, omega):
-#         super(OPE, self).__init__()
-#         self.max_freq = max_freq
-#         self.omega = omega
-#         self.embed_fns = get_embed_fns(self.max_freq)
-
-#     def embed(self, inputs):
-#         """
-#         N,bsize,1 ---> N,bsize,1,2n+1
-#         """
-#         res = torch.cat([fn(inputs * self.omega).to(inputs.device) for fn in self.embed_fns], -1)
-#         return res.unsqueeze(-2)
-
-#     def forward(self, coords):
-#         """
-#         N,bsize,2 ---> N,bsize,(2n+1)^2
-#         """
-#         x_coord = coords[:, :, 0].unsqueeze(-1)
-#         y_coord = coords[:, :, 1].unsqueeze(-1)
-#         X = self.embed(x_coord)
-#         Y = self.embed(y_coord)
-#         ope_mat = torch.matmul(X.transpose(2, 3), Y)
-#         ope_flat = ope_mat.view(ope_mat.shape[0], ope_mat.shape[1], -1)
-#         return ope_flat
-    
-
-
 @register('naflte_ours')
 class NAFLTEOURS(nn.Module):
 
@@ -99,6 +60,22 @@ class NAFLTEOURS(nn.Module):
         mask = torch.triu(torch.ones(sz, sz), diagonal=1)
         mask[mask == 1] = float('-inf')
         return mask
+    
+    def M_Relax(self, M, num_pixels):
+        _, _, u, v = M.shape
+        M = M.view(-1, u, v)
+        M_list = []
+        M_list.append(M.unsqueeze(1))
+        for i in range(num_pixels):
+            pad = nn.ZeroPad2d(padding=(0, 0, i+1, 0))
+            pad_M = pad(M[:, :-1-i, :])
+            M_list.append(pad_M.unsqueeze(1))   # B*H, 1, W, W
+        for i in range(num_pixels):
+            pad = nn.ZeroPad2d(padding=(0, 0, 0, i+1))
+            pad_M = pad(M[:, i+1:, :])
+            M_list.append(pad_M.unsqueeze(1))
+        M_relaxed = torch.sum(torch.cat(M_list, 1), dim=1)
+        return M_relaxed
     
     def _compute_unscaled_pos_shift(self, w: int, device: torch.device):
         """
@@ -314,40 +291,48 @@ class NAFLTEOURS(nn.Module):
         self.feat_left, self.feat_right, self.M_right_to_left, self.M_left_to_right \
             = self.encoder(x)
         
-        #  self.disp_r2l, self.disp_l2r = self.gen_initial_disp(self.M_right_to_left, self.M_left_to_right)
-        attn_mask = self._generate_square_subsequent_mask(w).to(x_left.device)  # generate attn mask
-        masked_M_right_to_left = self.M_right_to_left  + attn_mask[None, None, ...] 
-        masked_M_left_to_right = self.M_left_to_right  + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
-        ######################################## Winner Takes ALL #########################################################
-        out_1 = self.regress_disp(masked_M_right_to_left)
-        out_2 = self.regress_disp(masked_M_left_to_right, mode='l2r')
-        self.disp1, self.occ_left = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
-        self.disp2, self.occ_right = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
-        self.M_right_to_left, self.M_left_to_right = out_1['attn_ot'], out_2['attn_ot']
-        ######################################## disp norm #########################################################
-        # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
-        # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
+        # #  self.disp_r2l, self.disp_l2r = self.gen_initial_disp(self.M_right_to_left, self.M_left_to_right)
+        # attn_mask = self._generate_square_subsequent_mask(w).to(x_left.device)  # generate attn mask
+        # masked_M_right_to_left = self.M_right_to_left  + attn_mask[None, None, ...] 
+        # masked_M_left_to_right = self.M_left_to_right  + attn_mask[None, None, ...].permute(0, 1, 3, 2)  
+        # ######################################## Winner Takes ALL #########################################################
+        # out_1 = self.regress_disp(masked_M_right_to_left)
+        # out_2 = self.regress_disp(masked_M_left_to_right, mode='l2r')
+        # self.disp1, self.occ_left = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
+        # self.disp2, self.occ_right = out_1['disp_pred'].unsqueeze(1), out_2['occ_pred'].unsqueeze(1)
+        # self.M_right_to_left, self.M_left_to_right = out_1['attn_ot'], out_2['attn_ot']
+        # ######################################## disp norm #########################################################
+        # # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
+        # # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
+
+        # self.disp1 = self.disp1 * scale
+        # self.disp2 = self.disp2 * scale
+
+        # # softmax
+        self.M_right_to_left = torch.softmax(self.M_right_to_left, dim=-1)
+        self.M_left_to_right = torch.softmax(self.M_left_to_right, dim=-1)
+        # ######################################## valid mask #########################################################
+        M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
+        V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
+                           self.M_left_to_right.permute(0, 1, 3, 2).contiguous().view(-1, w).unsqueeze(2)
+                           ).detach().contiguous().view(b, 1, h, w)  # (B*H*Wr) * Wl * 1
+        M_left_to_right_relaxed = self.M_Relax(self.M_left_to_right, num_pixels=2)
+        V_right = torch.bmm(M_left_to_right_relaxed.contiguous().view(-1, w).unsqueeze(1),  # (B*H*Wl) * 1 * Wr
+                            self.M_right_to_left.permute(0, 1, 3, 2).contiguous().view(-1, w).unsqueeze(2)
+                                  ).detach().contiguous().view(b, 1, h, w)   # (B*H*Wr) * Wl * 1
+
+        self.occ_left = torch.tanh(5 * V_left) # b,1,h,wl
+        self.occ_right = torch.tanh(5 * V_right) # b,1,h,wr
+
+        # ############################################# Sum #################################################################
+        index = torch.arange(w).view(1, 1, 1, w).to(self.M_right_to_left.device).float()    # index: 1*1*w*1
+        # pos_shift = self._compute_unscaled_pos_shift(self.M_right_to_left.shape[2], self.M_right_to_left.device)  # NxHxW_leftxW_right
+        # pos_shift_T = pos_shift.permute(0, 1, 3, 2)
+        self.disp1 = torch.sum(self.M_right_to_left * index, dim=-1).view(b, 1, h, w)  # x axis of the corresponding point  b,1,h,w_l
+        self.disp2 = torch.sum(self.M_left_to_right * index, dim=-1).view(b, 1, h, w)  # b,1,h,w_r
 
         self.disp1 = self.disp1 * scale
         self.disp2 = self.disp2 * scale
-
-        # ######################################## valid mask #########################################################
-        # M_right_to_left_relaxed = self.M_Relax(self.M_right_to_left, num_pixels=2)
-        # V_left = torch.bmm(M_right_to_left_relaxed.contiguous().view(-1, w).unsqueeze(1),
-        #                    self.M_left_to_right.permute(0, 1, 3, 2).contiguous().view(-1, w).unsqueeze(2)
-        #                    ).detach().contiguous().view(b, 1, h, w)  # (B*H*Wr) * Wl * 1
-        # M_left_to_right_relaxed = self.M_Relax(self.M_left_to_right, num_pixels=2)
-        # V_right = torch.bmm(M_left_to_right_relaxed.contiguous().view(-1, w).unsqueeze(1),  # (B*H*Wl) * 1 * Wr
-        #                     self.M_right_to_left.permute(0, 1, 3, 2).contiguous().view(-1, w).unsqueeze(2)
-        #                           ).detach().contiguous().view(b, 1, h, w)   # (B*H*Wr) * Wl * 1
-
-        # self.V_left_tanh = torch.tanh(5 * V_left) # b,1,h,wl
-        # self.V_right_tanh = torch.tanh(5 * V_right) # b,1,h,wr
-
-        # ############################################# Sum #################################################################
-        # index = torch.linspace(0, 2, w).view(1, 1, 1, w).to(self.M_right_to_left.device).float()    # index: 1*1*w*1
-        # self.disp_l2r = torch.sum(self.M_right_to_left * index, dim=-1).view(b, 1, h, w) # x axis of the corresponding point  b,1,h,w_l
-        # self.disp_r2l = torch.sum(self.M_left_to_right * index, dim=-1).view(b, 1, h, w) # b,1,h,w_r
 
         return self.feat_left, self.feat_right, self.M_left_to_right, self.M_right_to_left
     
@@ -428,7 +413,7 @@ class NAFLTEOURS(nn.Module):
                 # q_freq = torch.cat((torch.cos(np.pi*q_freq), torch.sin(np.pi*q_freq)), dim=-1)
 
                 inp = torch.mul(q_coef, q_freq)
-                inp_d = torch.mul(q_d, q_freq)           
+                inp_d = q_d + q_freq          
 
                 pred = self.imnet(inp.contiguous().view(bs * q, -1)).view(bs, q, -1)
                 pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)
@@ -540,7 +525,7 @@ class NAFLTEOURS(nn.Module):
                 # q_freq = torch.cat((torch.cos(np.pi*q_freq), torch.sin(np.pi*q_freq)), dim=-1)
                 
                 inp = torch.mul(q_coef, q_freq)
-                inp_d = torch.mul(q_d, q_freq)             
+                inp_d = q_d + q_freq             
 
                 pred = self.imnet(inp.contiguous().view(bs * q, -1)).view(bs, q, -1)
                 pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)

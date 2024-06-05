@@ -214,14 +214,16 @@ class SCAM(nn.Module):
         self.l_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         
-        self.beta = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
-        self.gamma = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+        self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
 
         self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
         self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x_l, x_r):
         b, c, h, w = x_l.shape
+        # b, c, h, w = x_l.shape
+
         Q_l = self.l_proj1(self.norm_l(x_l)).permute(0, 2, 3, 1)  # B, H, Wl, c
         Q_r_T = self.r_proj1(self.norm_r(x_r)).permute(0, 2, 1, 3) # B, H, c, Wr (transposed)
 
@@ -230,29 +232,67 @@ class SCAM(nn.Module):
 
         # (B, H, Wl, c) x (B, H, c, Wr) -> (B, H, Wl, Wr)
         attention = torch.matmul(Q_l, Q_r_T) * self.scale
-        attentionT = attention.permute(0, 1, 3, 2)
-
-        ## select topk
-        mask1 = torch.zeros_like(attention, device=x_l.device, requires_grad=False)
-        mask2 = torch.zeros_like(attentionT, device=x_l.device, requires_grad=False)
-        index = torch.topk(attention, k=int(c/2), dim=-1, largest=True)[1]
-        indexT = torch.topk(attentionT, k=int(c/2), dim=-1, largest=True)[1]
-        mask1.scatter_(-1, index, 1.)
-        mask2.scatter_(-1, indexT, 1.)
-        attention = torch.where(mask1 > 0, attention, torch.full_like(attention, float('-inf')))
-        attentionT = torch.where(mask2 > 0, attentionT, torch.full_like(attentionT, float('-inf')))
-
 
         F_r2l = torch.matmul(torch.softmax(attention, dim=-1), V_r)  #B, H, Wl, c
-        F_l2r = torch.matmul(torch.softmax(attentionT, dim=-1), V_l) #B, H, Wr, c
+        F_l2r = torch.matmul(torch.softmax(attention.permute(0, 1, 3, 2), dim=-1), V_l) #B, H, Wr, c
         
         raw_attn = {}
-        raw_attn['r2l'] = torch.softmax(attention, dim=-1).contiguous()
-        raw_attn['l2r'] = torch.softmax(attentionT, dim=-1).contiguous()
+        raw_attn['r2l'] = attention.contiguous()
+        raw_attn['l2r'] = attention.permute(0, 1, 3, 2).contiguous()
+
         # scale
         F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
         F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
         return x_l + F_r2l, x_r + F_l2r, raw_attn
+    
+    # def __init__(self, c):
+    #     super().__init__()
+    #     self.scale = c ** -0.5
+
+    #     self.norm_l = LayerNorm2d(c)
+    #     self.norm_r = LayerNorm2d(c)
+    #     self.l_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+    #     self.r_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+        
+    #     self.beta = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
+    #     self.gamma = nn.Parameter(torch.ones((1, c, 1, 1)), requires_grad=True)
+
+    #     self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+    #     self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+
+    # def forward(self, x_l, x_r):
+    #     b, c, h, w = x_l.shape
+    #     Q_l = self.l_proj1(self.norm_l(x_l)).permute(0, 2, 3, 1)  # B, H, Wl, c
+    #     Q_r_T = self.r_proj1(self.norm_r(x_r)).permute(0, 2, 1, 3) # B, H, c, Wr (transposed)
+
+    #     V_l = self.l_proj2(x_l).permute(0, 2, 3, 1)  # B, H, Wl, c
+    #     V_r = self.r_proj2(x_r).permute(0, 2, 3, 1)  # B, H, Wr, c
+
+    #     # (B, H, Wl, c) x (B, H, c, Wr) -> (B, H, Wl, Wr)
+    #     attention = torch.matmul(Q_l, Q_r_T) * self.scale
+    #     attentionT = attention.permute(0, 1, 3, 2)
+
+    #     ## select topk
+    #     mask1 = torch.zeros_like(attention, device=x_l.device, requires_grad=False)
+    #     mask2 = torch.zeros_like(attentionT, device=x_l.device, requires_grad=False)
+    #     index = torch.topk(attention, k=int(c/2), dim=-1, largest=True)[1]
+    #     indexT = torch.topk(attentionT, k=int(c/2), dim=-1, largest=True)[1]
+    #     mask1.scatter_(-1, index, 1.)
+    #     mask2.scatter_(-1, indexT, 1.)
+    #     attention = torch.where(mask1 > 0, attention, torch.full_like(attention, float('-inf')))
+    #     attentionT = torch.where(mask2 > 0, attentionT, torch.full_like(attentionT, float('-inf')))
+
+
+    #     F_r2l = torch.matmul(torch.softmax(attention, dim=-1), V_r)  #B, H, Wl, c
+    #     F_l2r = torch.matmul(torch.softmax(attentionT, dim=-1), V_l) #B, H, Wr, c
+        
+    #     raw_attn = {}
+    #     raw_attn['r2l'] = torch.softmax(attention, dim=-1).contiguous()
+    #     raw_attn['l2r'] = torch.softmax(attentionT, dim=-1).contiguous()
+    #     # scale
+    #     F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
+    #     F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
+    #     return x_l + F_r2l, x_r + F_l2r, raw_attn
 
 class DropModule(nn.Module):
     def __init__(self, drop_rate, module):

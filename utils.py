@@ -325,11 +325,12 @@ def warp_coord(coord, disp, raw_hr, mask=None, mode='r2l'):
     Borrowed from:
     '''
     b, c, h, w = raw_hr.shape
-    y_disp = torch.zeros_like(disp)
-    disp = torch.cat((y_disp, disp * 2.0 / w), dim=-1)
-    if mode == 'l2r':
-        disp = -disp
-    coord_warp = coord - disp        # b, h*w, 2
+    # y_disp = torch.zeros_like(disp)
+    # disp = torch.cat((y_disp, disp * 2.0 / w), dim=-1)
+    # if mode == 'l2r':
+    #     disp = -disp
+    # coord_warp = coord - disp        # b, h*w, 2
+    coord_warp = torch.cat((coord[:,:,0].unsqueeze(-1), disp * 2.0 / w - 1.0), dim=-1)
     coord_warp = coord_warp.clamp_(-1, 1)
     grid = coord_warp.flip(-1).unsqueeze(1)
     # mask = torch.autograd.Variable(torch.ones(raw_hr.size())).to(raw_hr.device)
@@ -337,14 +338,14 @@ def warp_coord(coord, disp, raw_hr, mask=None, mode='r2l'):
 
     ret = F.grid_sample(raw_hr, grid, mode='nearest', padding_mode='border',align_corners=False)[:, :, 0, :] \
                     .permute(0, 2, 1)
-    if mask is not None:
-        output = ret * mask
-    else:
-        output = ret
+    # if mask is not None:
+    #     output = ret * mask
+    # else:
+    #     output = ret
+    output = ret
 
     return output
 
-     
 
 # def dispwarpfeature(feat, disp):
 #     bs, channels, height, width = feat.size()

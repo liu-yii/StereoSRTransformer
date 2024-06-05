@@ -81,4 +81,4 @@ epoch_val: 5
 epoch_save: 100
 save_dir: "results"
 
-resume: ~ # save\naf-lte_2024-05-30\epoch-last.pth
+resume: ~ # save\naf-lte_2024-06-01\epoch-last.pth

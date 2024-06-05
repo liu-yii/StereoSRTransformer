@@ -142,7 +142,7 @@ def train(train_loader, model, optimizer, epoch):
         # loss_cycle = loss_fn(V_l2r*lr_left_warp_warp, V_l2r*inp_left) + loss_fn(V_r2l*lr_right_warp_warp, V_r2l*inp_right)
         # loss_cycle = loss_fn(left_warp_warp, gt_left) + \
         #     loss_fn(right_warp_warp, gt_right)
-        # loss_smooth = loss_disp_smoothness(disp_l2r, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
+        # loss_smooth = loss_disp_smoothness(disp1, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
         lambda_loss = 0.1
         loss = loss_rgb + lambda_loss * loss_photo
