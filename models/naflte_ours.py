@@ -6,6 +6,7 @@ from torch.nn.utils import weight_norm
 
 import models
 from models import register
+from .arch_util import ResidualBlockwithBN
 from utils import make_coord, NestedTensor, batched_index_select, torch_1d_sample
 from .crossattention_arch import CrossScaleAttention
 # from .arch_util import PositionalEncoding
@@ -41,8 +42,15 @@ class NAFLTEOURS(nn.Module):
         # self.norm_r = LayerNorm2d(self.encoder.out_dim)
         self.coef = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
         self.freq = nn.Conv2d(2 * self.encoder.out_dim, hidden_dim, 3, padding=1)
-        self.conv0 = nn.Conv2d(1 + 3, hidden_dim, 3, padding=1)
-        
+        # dispnet
+        self.conv0 = nn.Sequential(nn.Conv2d(1 + 3, hidden_dim // 4, 3, 1, 1),
+                                    nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                                    nn.Conv2d(hidden_dim // 4, hidden_dim // 4, 1, 1, 0),
+                                    nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                                    nn.Conv2d(hidden_dim // 4, hidden_dim, 3, 1, 1))
+        self.query = nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0, bias=True)
+        self.key = nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0, bias=True)
+
         self.phase = nn.Linear(2, hidden_dim, bias=False)
         self.imnet = models.make(imnet_spec, args={'in_dim': hidden_dim})
         self.dispnet = models.make(dispnet_spec, args={'in_dim': hidden_dim})
@@ -77,6 +85,22 @@ class NAFLTEOURS(nn.Module):
         M_relaxed = torch.sum(torch.cat(M_list, 1), dim=1)
         return M_relaxed
     
+    def get_disp_range_samples(self, cur_disp, ndisp, shape, max_disp):
+        #shape, (B, H, W)
+        #cur_disp: (B, H, W)
+        #return disp_range_samples: (B, D, H, W)
+        cur_disp_min = (cur_disp - ndisp / 2).clamp(min=0.0)  # (B, H, W)
+        cur_disp_max = (cur_disp + ndisp / 2).clamp(max=max_disp)
+
+        assert cur_disp.shape == torch.Size(shape), "cur_disp:{}, input shape:{}".format(cur_disp.shape, shape)
+        new_interval = (cur_disp_max - cur_disp_min) / (ndisp - 1)  # (B, H, W)
+
+        disp_range_samples = cur_disp_min.unsqueeze(1) + (torch.arange(0, ndisp, device=cur_disp.device,
+                                                                        dtype=cur_disp.dtype,
+                                                                        requires_grad=False).reshape(1, -1, 1,
+                                                                                                    1) * new_interval.unsqueeze(1))
+        return disp_range_samples
+
     def _compute_unscaled_pos_shift(self, w: int, device: torch.device):
         """
         Compute relative difference between each pixel location from left image to right image, to be used to calculate
@@ -276,6 +300,7 @@ class NAFLTEOURS(nn.Module):
 
     def gen_feat(self, x_left, x_right, scale):
         self.inp_l, self.inp_r = x_left, x_right
+        self.upscale_factor = scale
         b,c,h,w = self.inp_l.shape
         x = torch.cat((self.inp_l, self.inp_r), dim=0)
         self.feat_coord = make_coord(self.inp_l.shape[-2:], flatten=False).cuda() \
@@ -305,10 +330,10 @@ class NAFLTEOURS(nn.Module):
         # # self.disp_l2r, self.occ_left = self.norm_disp(self.disp_l2r, self.occ_left)
         # # self.disp_r2l, self.occ_right = self.norm_disp(self.disp_r2l, self.occ_right)
 
-        # self.disp1 = self.disp1 * scale
-        # self.disp2 = self.disp2 * scale
+        # self.disp1 = self.disp1 * scale[:,:,None,None].repeat(1,1,h,w)
+        # self.disp2 = self.disp2 * scale[:,:,None,None].repeat(1,1,h,w)
 
-        # # softmax
+        # softmax
         self.M_right_to_left = torch.softmax(self.M_right_to_left, dim=-1)
         self.M_left_to_right = torch.softmax(self.M_left_to_right, dim=-1)
         # ######################################## valid mask #########################################################
@@ -331,8 +356,8 @@ class NAFLTEOURS(nn.Module):
         self.disp1 = torch.sum(self.M_right_to_left * index, dim=-1).view(b, 1, h, w)  # x axis of the corresponding point  b,1,h,w_l
         self.disp2 = torch.sum(self.M_left_to_right * index, dim=-1).view(b, 1, h, w)  # b,1,h,w_r
 
-        self.disp1 = self.disp1 * scale
-        self.disp2 = self.disp2 * scale
+        self.disp1 = self.disp1 * scale[:,:,None,None].repeat(1,1,h,w)
+        self.disp2 = self.disp2 * scale[:,:,None,None].repeat(1,1,h,w)
 
         return self.feat_left, self.feat_right, self.M_left_to_right, self.M_right_to_left
     
@@ -341,15 +366,15 @@ class NAFLTEOURS(nn.Module):
         feat_leftW = torch.matmul(self.M_right_to_left, self.projr(self.feat_right).permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         feat = torch.cat((self.feat_left, feat_leftW), dim=1)
 
-        eps = 1e-6
-        mean_disp_pred = self.disp1.mean()
-        std_disp_pred = self.disp1.std() + eps
-        disp_pred_normalized = (self.disp1 - mean_disp_pred) / std_disp_pred
+        # eps = 1e-6
+        # mean_disp_pred = self.disp1.mean()
+        # std_disp_pred = self.disp1.std() + eps
+        # disp_pred_normalized = (self.disp1 - mean_disp_pred) / std_disp_pred
 
         
-        # feat_d = torch.cat((self.feat_left, self.disp_l2r), dim=1)
+        # # feat_d = torch.cat((self.feat_left, self.disp_l2r), dim=1)
 
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_l), dim=1))
+        # feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_l), dim=1))
 
         # feat = torch.cat((feat, self.disp_l2r), dim=1)
         # feat = self.feat_left
@@ -369,7 +394,7 @@ class NAFLTEOURS(nn.Module):
         feat_coord = self.feat_coord
 
         preds = []
-        disps = []
+        # disps = []
         areas = []
         for vx in vx_lst:
             for vy in vy_lst:
@@ -386,10 +411,10 @@ class NAFLTEOURS(nn.Module):
                     freq, coord_.flip(-1).unsqueeze(1),
                     mode='nearest', align_corners=False)[:, :, 0, :] \
                     .permute(0, 2, 1)
-                q_d = F.grid_sample(
-                    feat_d, coord_.flip(-1).unsqueeze(1),
-                    mode='nearest', align_corners=False)[:, :, 0, :] \
-                    .permute(0, 2, 1)
+                # q_d = F.grid_sample(
+                #     feat_d, coord_.flip(-1).unsqueeze(1),
+                #     mode='nearest', align_corners=False)[:, :, 0, :] \
+                #     .permute(0, 2, 1)
                 q_coord = F.grid_sample(
                     feat_coord, coord_.flip(-1).unsqueeze(1),
                     mode='nearest', align_corners=False)[:, :, 0, :] \
@@ -413,13 +438,13 @@ class NAFLTEOURS(nn.Module):
                 # q_freq = torch.cat((torch.cos(np.pi*q_freq), torch.sin(np.pi*q_freq)), dim=-1)
 
                 inp = torch.mul(q_coef, q_freq)
-                inp_d = q_d + q_freq          
+                # inp_d = q_d + q_freq          
 
                 pred = self.imnet(inp.contiguous().view(bs * q, -1)).view(bs, q, -1)
-                pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)
+                # pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)
                 # pred_disp = torch.zeros((bs, q, 1)).to(pred.device)
                 preds.append(pred)
-                disps.append(pred_disp)
+                # disps.append(pred_disp)
 
                 area = torch.abs(rel_coord[:, :, 0] * rel_coord[:, :, 1])
                 areas.append(area + 1e-9)
@@ -429,23 +454,23 @@ class NAFLTEOURS(nn.Module):
         t = areas[1]; areas[1] = areas[2]; areas[2] = t
         
         ret = 0
-        ret_disp = 0
-        for pred, pred_disp, area in zip(preds, disps, areas):
+        # ret_disp = 0
+        for pred, area in zip(preds, areas):
             ret = ret + pred * (area / tot_area).unsqueeze(-1)
-            ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
+            # ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
         rgb = ret + F.grid_sample(self.inp_l, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp1_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
-        mask1_hr = F.grid_sample(self.occ_left, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
-        disp1_hr = disp1_hr * std_disp_pred + mean_disp_pred
+        # disp1_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        #               padding_mode='border', align_corners=False)[:, :, 0, :] \
+        #               .permute(0, 2, 1)
+        # mask1_hr = F.grid_sample(self.occ_left, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        #               padding_mode='border', align_corners=False)[:, :, 0, :] \
+        #               .permute(0, 2, 1)
+        # disp1_hr = disp1_hr * std_disp_pred + mean_disp_pred
         
 
-        return rgb, disp1_hr, mask1_hr
+        return rgb #, disp1_hr, mask1_hr
     
     def query_rgb_right(self, coord, cell=None):
         
@@ -455,13 +480,13 @@ class NAFLTEOURS(nn.Module):
         
         # feat = self.feat_right + feat_rightW
         # feat_d = torch.cat((self.feat_right, self.disp_r2l), dim=1)
-        eps = 1e-6
-        mean_disp_pred = self.disp2.mean()
-        std_disp_pred = self.disp2.std() + eps
-        disp_pred_normalized = (self.disp2 - mean_disp_pred) / std_disp_pred
+        # eps = 1e-6
+        # mean_disp_pred = self.disp2.mean()
+        # std_disp_pred = self.disp2.std() + eps
+        # disp_pred_normalized = (self.disp2 - mean_disp_pred) / std_disp_pred
         
 
-        feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_r), dim=1))
+        # feat_d = self.conv0(torch.cat((disp_pred_normalized, self.inp_r), dim=1))
         # feat = self.feat_right
         # feat = torch.cat((feat, self.disp_r2l), dim=1)
         # key pos
@@ -479,7 +504,7 @@ class NAFLTEOURS(nn.Module):
         feat_coord = self.feat_coord      #16,2,48,48
 
         preds = []
-        disps = []
+        # disps = []
         areas = []
         for vx in vx_lst:
             for vy in vy_lst:
@@ -497,10 +522,10 @@ class NAFLTEOURS(nn.Module):
                     mode='nearest', align_corners=False)[:, :, 0, :] \
                     .permute(0, 2, 1)
                 
-                q_d = F.grid_sample(
-                    feat_d, coord_.flip(-1).unsqueeze(1),
-                    mode='nearest', align_corners=False)[:, :, 0, :] \
-                    .permute(0, 2, 1)
+                # q_d = F.grid_sample(
+                #     feat_d, coord_.flip(-1).unsqueeze(1),
+                #     mode='nearest', align_corners=False)[:, :, 0, :] \
+                #     .permute(0, 2, 1)
                 
                 q_coord = F.grid_sample(
                     feat_coord, coord_.flip(-1).unsqueeze(1),
@@ -525,13 +550,13 @@ class NAFLTEOURS(nn.Module):
                 # q_freq = torch.cat((torch.cos(np.pi*q_freq), torch.sin(np.pi*q_freq)), dim=-1)
                 
                 inp = torch.mul(q_coef, q_freq)
-                inp_d = q_d + q_freq             
+                # inp_d = q_d + q_freq             
 
                 pred = self.imnet(inp.contiguous().view(bs * q, -1)).view(bs, q, -1)
-                pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)
+                # pred_disp = self.dispnet(inp_d.contiguous().view(bs * q, -1)).view(bs, q, -1)
                 # pred_disp = torch.zeros((bs, q, 1)).to(pred.device)
                 preds.append(pred)
-                disps.append(pred_disp)
+                # disps.append(pred_disp)
 
                 area = torch.abs(rel_coord[:, :, 0] * rel_coord[:, :, 1])
                 areas.append(area + 1e-9)
@@ -541,26 +566,117 @@ class NAFLTEOURS(nn.Module):
         t = areas[1]; areas[1] = areas[2]; areas[2] = t
         
         ret = 0
-        ret_disp = 0
-        for pred, pred_disp, area in zip(preds, disps, areas):
+        # ret_disp = 0
+        for pred, area in zip(preds, areas):
             ret = ret + pred * (area / tot_area).unsqueeze(-1)
-            ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
+            # ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
 
         rgb = ret + F.grid_sample(self.inp_r, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp2_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
-        mask2_hr = F.grid_sample(self.occ_right, coord.flip(-1).unsqueeze(1), mode='bilinear',\
-                      padding_mode='border', align_corners=False)[:, :, 0, :] \
-                      .permute(0, 2, 1)
-        disp2_hr = disp2_hr * std_disp_pred + mean_disp_pred
+        # disp2_hr = ret_disp + F.grid_sample(disp_pred_normalized, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        #               padding_mode='border', align_corners=False)[:, :, 0, :] \
+        #               .permute(0, 2, 1)
+        # mask2_hr = F.grid_sample(self.occ_right, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        #               padding_mode='border', align_corners=False)[:, :, 0, :] \
+        #               .permute(0, 2, 1)
+        # disp2_hr = disp2_hr * std_disp_pred + mean_disp_pred
         
-        return rgb, disp2_hr, mask2_hr
+        return rgb #, disp2_hr, mask2_hr
     
+    def query_disp(self, coord, cell=None):
+        eps = 1e-6
 
+        xl = torch.cat((self.disp1, self.inp_l), dim=1)
+        feat1 = self.conv0(xl)
+
+        xr = torch.cat((self.disp2, self.inp_r), dim=1)
+        feat2 = self.conv0(xr)
+        
+        Q1 = self.query(feat1)
+        Q2 = self.key(feat2)
+
+        vx_lst = [-1, 1]
+        vy_lst = [-1, 1]
+        eps_shift = 1e-6 
+
+        # field radius (global: [-1, 1])
+        rx = 2 / feat1.shape[-2] / 2
+        ry = 2 / feat1.shape[-1] / 2
+
+        feat_coord = self.feat_coord      #16,2,48,48
+
+        preds = []
+        areas = []
+        for vx in vx_lst:
+            for vy in vy_lst:
+                # prepare coefficient & frequency
+                coord_ = coord.clone()
+                coord_[:, :, 0] += vx * rx + eps_shift
+                coord_[:, :, 1] += vy * ry + eps_shift
+                coord_.clamp_(-1 + 1e-6, 1 - 1e-6)
+                # q_coef = F.grid_sample(
+                #     coef, coord_.flip(-1).unsqueeze(1),
+                #     mode='nearest', align_corners=False)[:, :, 0, :] \
+                #     .permute(0, 2, 1)
+                q_1 = F.grid_sample(
+                    Q1, coord_.flip(-1).unsqueeze(1),
+                    mode='nearest', align_corners=False)[:, :, 0, :] \
+                    .permute(0, 2, 1)
+                
+                q_2 = F.grid_sample(
+                    Q2, coord_.flip(-1).unsqueeze(1),
+                    mode='nearest', align_corners=False)[:, :, 0, :] \
+                    .permute(0, 2, 1)
+                
+                q_coord = F.grid_sample(
+                    feat_coord, coord_.flip(-1).unsqueeze(1),
+                    mode='nearest', align_corners=False)[:, :, 0, :] \
+                    .permute(0, 2, 1)
+                rel_coord = coord - q_coord
+                rel_coord[:, :, 0] *= feat1.shape[-2]
+                rel_coord[:, :, 1] *= feat1.shape[-1]
+                
+                # prepare cell
+                rel_cell = cell.clone()
+                rel_cell[:, :, 0] *= feat1.shape[-2]
+                rel_cell[:, :, 1] *= feat1.shape[-1]
+
+                bs, q = coord.shape[:2]
+                coord_ff, _ = self.pe(rel_coord)
+                q_feat = torch.mul(q_1, q_2)
+                q_feat = torch.mul(q_feat, coord_ff)
+                q_feat += self.phase(rel_cell.view((bs * q, -1))).view(bs, q, -1)
+
+                inp = q_feat
+          
+                pred = self.dispnet(inp.contiguous().view(bs * q, -1)).view(bs, q, -1)
+                preds.append(pred)
+
+                area = torch.abs(rel_coord[:, :, 0] * rel_coord[:, :, 1])
+                areas.append(area + 1e-9)
+
+        tot_area = torch.stack(areas).sum(dim=0)
+        t = areas[0]; areas[0] = areas[3]; areas[3] = t
+        t = areas[1]; areas[1] = areas[2]; areas[2] = t
+        
+        ret = 0
+        for pred, area in zip(preds, areas):
+            ret = ret + pred * (area / tot_area).unsqueeze(-1)
+
+        disp1_hr = ret[:,:,0].unsqueeze(-1) + F.grid_sample(self.disp1, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+                      padding_mode='border', align_corners=False)[:, :, 0, :] \
+                      .permute(0, 2, 1)
+        disp2_hr = ret[:,:,1].unsqueeze(-1) + F.grid_sample(self.disp2, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+                      padding_mode='border', align_corners=False)[:, :, 0, :] \
+                      .permute(0, 2, 1)
+        mask1_hr = F.grid_sample(self.occ_left, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+                      padding_mode='border', align_corners=False)[:, :, 0, :] \
+                      .permute(0, 2, 1)
+
+        
+        return disp1_hr, disp2_hr, mask1_hr
     def forward(self, inp_left, inp_right, coord, cell, scale):
         self.gen_feat(inp_left, inp_right, scale)
         return self.query_rgb_left(coord, cell), self.query_rgb_right(coord, cell),\
-              (self.M_left_to_right, self.M_right_to_left)
+              self.query_disp(coord, cell)

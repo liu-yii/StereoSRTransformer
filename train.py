@@ -103,7 +103,7 @@ def train(train_loader, model, optimizer, epoch):
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
         data, filename, scale = batch
-        scale = scale[0]
+        scale = scale.cuda()
 
         for k, v in data.items():
             data[k] = v.cuda()
@@ -115,19 +115,21 @@ def train(train_loader, model, optimizer, epoch):
         gt_left, gt_right = torch.chunk(gt, 2, dim=-1)
         raw_left, raw_right = torch.chunk(raw_hr, 2, dim=-1)
         
-        preds_left, preds_right, _ = model(inp_left, inp_right, data['coord'], data['cell'], scale)
+        pred_left, pred_right, pred_disp = model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
-        pred_left, pred_right = denormalize(preds_left[0]), denormalize(preds_right[0])
-        disp1, disp2 = preds_left[1], preds_right[1]
-        mask1, mask2 = preds_left[2], preds_right[2]
+        
+
+        pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
+        disp1, disp2, mask1 = pred_disp
+        # M_l2r, M_r2l = attention_map
         # M_l2r, M_r2l = attention_map
         
         loss_rgb = loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right)
 
         # h, w = hr_size[0][0], hr_size[1][0]
         # warp_left = warp_coord(hr_coord, hrl_d, right_img)
-        warp_left = warp_coord(data['coord'], disp1, raw_right, mask1)
-        warp_right = warp_coord(data['coord'], disp2, raw_left, mask2, mode='l2r')
+        warp_left = warp_coord(data['coord'], disp1, raw_right)
+        warp_right = warp_coord(data['coord'], disp2, raw_left, mode='l2r')
         # left_warp_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
         # right_warp_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
 

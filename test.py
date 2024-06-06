@@ -29,22 +29,26 @@ def batched_predict(model, inp_left, inp_right, coord, cell, bsize, scale):
         ql = 0
         preds_left = []
         preds_right = []
-        disps_l2r = []
-        disps_r2l = []
+        disps1 = []
+        disps2 = []
+        masks = []
         while ql < n:
             qr = min(ql + bsize, n)
-            pred_left, disp_r2l, _ = model.query_rgb_left(coord[:, ql: qr, :], cell[:, ql: qr, :])
-            pred_right, disp_l2r, _ = model.query_rgb_right(coord[:, ql: qr, :], cell[:, ql: qr, :])
+            pred_left = model.query_rgb_left(coord[:, ql: qr, :], cell[:, ql: qr, :])
+            pred_right = model.query_rgb_right(coord[:, ql: qr, :], cell[:, ql: qr, :])
+            pred_disp1,pred_disp2, mask = model.query_disp(coord[:, ql: qr, :], cell[:, ql: qr, :])
             preds_left.append(pred_left)
             preds_right.append(pred_right)
-            disps_l2r.append(disp_l2r)
-            disps_r2l.append(disp_r2l)
+            disps1.append(pred_disp1)
+            disps2.append(pred_disp2)
+            masks.append(mask)
             ql = qr
         pred_left = torch.cat(preds_left, dim=1)
         pred_right = torch.cat(preds_right, dim=1)
-        disp_l2r = torch.cat(disps_l2r, dim=1)
-        disp_r2l = torch.cat(disps_r2l, dim=1)
-    return (pred_left, disp_r2l), (pred_right, disp_l2r)
+        disp1 = torch.cat(disps1, dim=1)
+        disp2 = torch.cat(disps2, dim=1)
+        mask = torch.cat(masks, dim=1)
+    return pred_left, pred_right, (disp1, disp2, mask)
 
 
 def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsize=None, scale_max=4, fast=False,
@@ -82,7 +86,7 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
     pbar = tqdm(loader, leave=False, desc='val')
     for batch in pbar:
         data, filename, scale = batch
-        scale = scale[0].item()
+        scale = scale.cuda()
         for k, v in data.items():
             data[k] = v.cuda()
         filename = filename[0].split('.')[0]
@@ -95,19 +99,17 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         start_time = time.time()    
         if eval_bsize is None:
             with torch.no_grad():
-                preds_left, preds_right, _ = model(inp_left, inp_right, coord, cell, scale)
+                pred_left, pred_right, pred_disp = model(inp_left, inp_right, coord, cell, scale)
         else:
             if fast:
-                preds_left, preds_right, _ = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1), scale)
+                pred_left, pred_right, pred_disp = model(inp_left, inp_right, coord, cell*max(scale/scale_max, 1), scale)
             else:
-                preds_left, preds_right = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize, scale) # cell clip for extrapolation
+                pred_left, pred_right, pred_disp = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize, scale) # cell clip for extrapolation
         infer_time = time.time()-start_time
         
-        pred_left, pred_right = preds_left[0], preds_right[0]
-        disp_l2r, disp_r2l = preds_left[1], preds_right[1]
-        pred_left = denormalize(pred_left)
+        pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
+        disp1,disp2, mask1 = pred_disp
         pred_left.clamp_(0, 1)
-        pred_right = denormalize(pred_right)
         pred_right.clamp_(0, 1)
         
         # for i, pred in enumerate([pred_left, pred_right]):   
@@ -128,7 +130,7 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
             save_imgs = {
                         f'{save_dir}/{filename}_L.png': pred_left.view(int(scale*h), int(scale*w), 3),
                         f'{save_dir}/{filename}_R.png': pred_right.view(int(scale*h), int(scale*w), 3),
-                        f'{save_dir}/{filename}_disp.png': disp_l2r.view(int(scale*h), int(scale*w), 1)
+                        f'{save_dir}/{filename}_disp.png': disp1.view(int(scale*h), int(scale*w), 1)
                     }
             for path, img in save_imgs.items():
                     img = img.cpu().numpy()

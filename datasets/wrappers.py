@@ -469,4 +469,4 @@ class SRImplicitStereo(Dataset):
             'cell': cell,
             'gt': hr_rgb,
             'raw_hr': raw_hr,
-        }, filename, s
+        }, filename, torch.Tensor([s])
