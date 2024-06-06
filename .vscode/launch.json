@@ -10,7 +10,7 @@
             "justMyCode": true,
             "args": [
                 "--config",
-                "configs/train-AID/train_naf-lte.yaml",
+                "configs/train-AID/train_ssrtr-lte.yaml",
                 "--name",
                 "naf-lte",
                 "--tag",

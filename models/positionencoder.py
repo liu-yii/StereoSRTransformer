@@ -181,14 +181,5 @@ class PositionEncodingSine1DRelative(nn.Module):
         pos_x = x_embed[:, None] / dim_t  # 2W-1xC
         # interleave cos and sin instead of concatenate
         pos = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).flatten(1)  # 2W-1xC
-
-        # indexes to shift rel pos encoding
-        indexes_r = torch.linspace(w - 1, 0, w).view(w, 1).to(x.device)
-        indexes_c = torch.linspace(0, w - 1, w).view(1, w).to(x.device)
-        pos_indexes = (indexes_r + indexes_c).view(-1).long()  # WxW' -> WW'
-
-        pos_enc = torch.index_select(pos_enc, 0, pos_indexes).view(w, w,-1)  # 2W-1xC -> WW'xC -> WxW'xC
-        # compute k_r, q_r
         
-
         return pos

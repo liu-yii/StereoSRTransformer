@@ -234,57 +234,201 @@ class CAB(nn.Module):
     def forward(self, x):
         return self.cab(x)
 
-class SSCAM(nn.Module):
+class SSCAM(nn.MultiheadAttention):
     '''
     Selective Stereo Cross Attention Module (SSCAM)
     '''
-    def __init__(self, c):
-        super().__init__()
-        self.scale = c ** -0.5
+    def __init__(self, embed_dim, num_heads):
+        super().__init__(embed_dim, num_heads, dropout=0.0, bias=True,
+                                                         add_bias_kv=False, add_zero_attn=False,
+                                                         kdim=None, vdim=None)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
-        self.norm_l = LayerNorm2d(c)
-        self.norm_r = LayerNorm2d(c)
-        self.l_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
-        self.r_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
-        
-        self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
-        self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
+    def cross_attn(self, query, key, value, attn_mask=None, pos_enc=None, pos_indexes=None):
+        """
+        Multihead attention
 
-        self.l_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
-        self.r_proj2 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+        :param query: [W,HN,C]
+        :param key: [W,HN,C]
+        :param value: [W,HN,C]
+        :param attn_mask: mask to invalidate attention, -inf is used for invalid attention, [W,W]
+        :param pos_enc: [2W-1,C]
+        :param pos_indexes: index to select relative encodings, flattened in transformer WW
+        :return: output value vector, attention with softmax (for debugging) and raw attention (used for last layer)
+        """
 
-    def forward(self, x, x_size):
+        w, bsz, embed_dim = query.size()
+        head_dim = embed_dim // self.num_heads
+        assert head_dim * self.num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+
+        # project to get qkv
+        if torch.equal(query, key) and torch.equal(key, value):
+            # self-attention
+            q, k, v = F.linear(query, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
+
+        elif torch.equal(key, value):
+            # cross-attention
+            _b = self.in_proj_bias
+            _start = 0
+            _end = embed_dim
+            _w = self.in_proj_weight[_start:_end, :]
+            if _b is not None:
+                _b = _b[_start:_end]
+            q = F.linear(query, _w, _b)
+
+            if key is None:
+                assert value is None
+                k = None
+                v = None
+            else:
+                _b = self.in_proj_bias
+                _start = embed_dim
+                _end = None
+                _w = self.in_proj_weight[_start:, :]
+                if _b is not None:
+                    _b = _b[_start:]
+                k, v = F.linear(key, _w, _b).chunk(2, dim=-1)
+
+        # project to find q_r, k_r
+        if pos_enc is not None:
+            # reshape pos_enc
+            pos_enc = torch.index_select(pos_enc, 0, pos_indexes).view(w, w,
+                                                                       -1)  # 2W-1xC -> WW'xC -> WxW'xC
+            # compute k_r, q_r
+            _start = 0
+            _end = 2 * embed_dim
+            _w = self.in_proj_weight[_start:_end, :]
+            _b = self.in_proj_bias[_start:_end]
+            q_r, k_r = F.linear(pos_enc, _w, _b).chunk(2, dim=-1)  # WxW'xC
+        else:
+            q_r = None
+            k_r = None
+
+        # scale query
+        scaling = float(head_dim) ** -0.5
+        q = q * scaling
+        if q_r is not None:
+            q_r = q_r * scaling
+
+        # reshape
+        q = q.contiguous().view(w, bsz, self.num_heads, head_dim)  # WxNxExC
+        if k is not None:
+            k = k.contiguous().view(-1, bsz, self.num_heads, head_dim)
+        if v is not None:
+            v = v.contiguous().view(-1, bsz, self.num_heads, head_dim)
+
+        if q_r is not None:
+            q_r = q_r.contiguous().view(w, w, self.num_heads, head_dim)  # WxW'xExC
+        if k_r is not None:
+            k_r = k_r.contiguous().view(w, w, self.num_heads, head_dim)
+
+        # compute attn weight
+        attn_feat = torch.einsum('wnec,vnec->newv', q, k)  # NxExWxW'
+
+        # add positional terms
+        if pos_enc is not None:
+            # 0.3 s
+            attn_feat_pos = torch.einsum('wnec,wvec->newv', q, k_r)  # NxExWxW'
+            attn_pos_feat = torch.einsum('vnec,wvec->newv', k, q_r)  # NxExWxW'
+
+            # 0.1 s
+            attn = attn_feat + attn_feat_pos + attn_pos_feat
+        else:
+            attn = attn_feat
+
+        assert list(attn.size()) == [bsz, self.num_heads, w, w]
+
+        # apply attn mask
+        if attn_mask is not None:
+            attn_mask = attn_mask[None, None, ...]
+            attn += attn_mask
+
+        # raw attn
+        raw_attn = attn
+
+        # softmax
+        attn = F.softmax(attn, dim=-1)
+
+        # compute v, equivalent to einsum('',attn,v),
+        # need to do this because apex does not support einsum when precision is mixed
+        v_o = torch.bmm(attn.view(bsz * self.num_heads, w, w),
+                        v.permute(1, 2, 0, 3).view(bsz * self.num_heads, w, head_dim))  # NxExWxW', W'xNxExC -> NExWxC
+        assert list(v_o.size()) == [bsz * self.num_heads, w, head_dim]
+        v_o = v_o.reshape(bsz, self.num_heads, w, head_dim).permute(2, 0, 1, 3).reshape(w, bsz, embed_dim)
+        v_o = F.linear(v_o, self.out_proj.weight, self.out_proj.bias)
+
+        # average attention weights over heads
+        attn = attn.sum(dim=1) / self.num_heads
+
+        # raw attn
+        raw_attn = raw_attn.sum(dim=1)
+
+        return v_o, attn, raw_attn
+
+    def forward(self, x, x_size, pos_enc=None, last_layer=False):
         h, w = x_size
         b, _, c = x.shape
-        x = x.view(b, h, w, c).permute(0, 3, 1, 2)  # B C H W
-        x_l, x_r = x.chunk(2, dim=0)
         
-        # b, c, h, w = x_l.shape
-
-        Q_l = self.l_proj1(self.norm_l(x_l)).permute(0, 2, 3, 1)  # B, H, Wl, c
-        Q_r_T = self.r_proj1(self.norm_r(x_r)).permute(0, 2, 1, 3) # B, H, c, Wr (transposed)
-
-        V_l = self.l_proj2(x_l).permute(0, 2, 3, 1)  # B, H, Wl, c
-        V_r = self.r_proj2(x_r).permute(0, 2, 3, 1)  # B, H, Wr, c
-
-        # (B, H, Wl, c) x (B, H, c, Wr) -> (B, H, Wl, Wr)
-        attention = torch.matmul(Q_l, Q_r_T) * self.scale
-
-        F_r2l = torch.matmul(torch.softmax(attention, dim=-1), V_r)  #B, H, Wl, c
-        F_l2r = torch.matmul(torch.softmax(attention.permute(0, 1, 3, 2), dim=-1), V_l) #B, H, Wr, c
         
-        raw_attn = {}
-        raw_attn['r2l'] = attention.contiguous()
-        raw_attn['l2r'] = attention.permute(0, 1, 3, 2).contiguous()
-
-        # scale
-        F_r2l = F_r2l.permute(0, 3, 1, 2) * self.beta
-        F_l2r = F_l2r.permute(0, 3, 1, 2) * self.gamma
-        x_l = x_l + F_r2l
-        x_r = x_r + F_l2r
-        cross_x = torch.cat([x_l, x_r], dim=0).view(b, c, h, w).permute(0, 2, 3, 1).reshape(b, h * w, c)
+        x = x.view(b, h, w, c).permute(3, 2, 1, 0).flatten(2).permute(1, 2, 0)  # Wx2HNxC
+        feat_left, feat_right = x.chunk(2, dim=1)
+        if pos_enc is not None:
+            with torch.no_grad():
+                # indexes to shift rel pos encoding
+                indexes_r = torch.linspace(w - 1, 0, w).view(w, 1).to(feat_left.device)
+                indexes_c = torch.linspace(0, w - 1, w).view(1, w).to(feat_left.device)
+                pos_indexes = (indexes_r + indexes_c).view(-1).long()  # WxW' -> WW'
+        else:
+            pos_indexes = None
         
-        return cross_x, raw_attn
+        feat_left_2 = self.norm1(feat_left)
+        feat_right_2 = self.norm1(feat_right)
+        # update right features
+        if pos_enc is not None:
+            pos_flipped = torch.flip(pos_enc, [0])
+        else:
+            pos_flipped = pos_enc
+        feat_right_2, attn_weight1, _ = self.cross_attn(query=feat_right_2, key=feat_left_2, value=feat_left_2, pos_enc=pos_flipped,
+                                       pos_indexes=pos_indexes)
+
+        feat_right = feat_right + feat_right_2
+
+        # update left features
+        # use attn mask for last layer
+        if last_layer:
+            w = feat_left_2.size(0)
+            attn_mask = self._generate_square_subsequent_mask(w).to(feat_left.device)  # generate attn mask
+        else:
+            attn_mask = None
+
+        # normalize again the updated right features
+        feat_right_2 = self.norm2(feat_right)
+        feat_left_2, attn_weight2, raw_attn = self.cross_attn(query=feat_left_2, key=feat_right_2, value=feat_right_2,
+                                                             attn_mask=attn_mask, pos_enc=pos_enc,
+                                                             pos_indexes=pos_indexes)
+
+        # torch.save(attn_weight, 'cross_attn_' + str(layer_idx) + '.dat')
+
+        feat_left = feat_left + feat_left_2
+
+        # concat features
+        feat = torch.cat([feat_left, feat_right], dim=1)  # Wx2HNxC
+        feat = feat.view(w, b, h, c).permute(1, 3, 2, 0).flatten(2).permute(0, 2, 1)
+        attn_weight = [attn_weight2, attn_weight1]
+        return feat, attn_weight, raw_attn
+    
+    @torch.no_grad()
+    def _generate_square_subsequent_mask(self, sz: int):
+        """
+        Generate a mask which is upper triangular
+
+        :param sz: square matrix size
+        :return: diagonal binary mask [sz,sz]
+        """
+        mask = torch.triu(torch.ones(sz, sz), diagonal=1)
+        mask[mask == 1] = float('-inf')
+        return mask
 
 class SCAM(nn.Module):
     '''
@@ -846,6 +990,7 @@ class StereoIR(nn.Module):
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
+        self.rpe = True
         self.patch_norm = patch_norm
         self.num_features = embed_dim
         self.mlp_ratio = mlp_ratio
@@ -863,7 +1008,9 @@ class StereoIR(nn.Module):
         self.patch_unembed = PatchUnEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=embed_dim, embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None)
-
+        # relative position encoding
+        if self.rpe:
+            self.pos_encoder = PositionEncodingSine1DRelative(embed_dim)
         # absolute position embedding
         if self.ape:
             # self.pos_encoding = PositionEncodingSine1DRelative(num_pos_feats=embed_dim)
@@ -898,7 +1045,7 @@ class StereoIR(nn.Module):
 
                          )
             self.layers.append(layer)
-            cross_attn = SSCAM(embed_dim)
+            cross_attn = SSCAM(embed_dim, num_heads=num_heads[i_layer])
             self.scam_layer.append(cross_attn)
 
         self.norm = norm_layer(self.num_features)
@@ -976,43 +1123,47 @@ class StereoIR(nn.Module):
             x = x  + self.absolute_pos_embed
         x = self.pos_drop(x)
 
+        if self.rpe:
+            pos_enc = self.pos_encoder(x)
+        
         for i, layer in enumerate(self.layers):
             x = layer(x, x_size)
-            x, attn = self.scam_layer[i](x, x_size)
+            x, attn_weight, raw_attn = self.scam_layer[i](x, x_size, pos_enc, last_layer=(i == len(self.layers) - 1))
 
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)
 
-        return x, attn
+        return x, attn_weight, raw_attn
 
 
     def forward(self, x):
         # x: 2B,C,H,W
         H, W = x.shape[2:]
         x = self.check_image_size(x)
+        b, c, h, w = x.shape
 
         if self.upsampler == 'none':
             x = self.conv_first(x)
-            x1, attn = self.forward_features(x)
+            x1, attn_weight, raw_attn = self.forward_features(x)
             x = self.conv_after_body(x1) + x
             x = self.conv_before_upsample(x)
         elif self.upsampler == 'pixelshuffle':
             # for classical SR
             x = self.conv_first(x)
-            x1, attn = self.forward_features(x)
+            x1, attn_weight, raw_attn = self.forward_features(x)
             x = self.conv_after_body(x1) + x
             x = self.conv_before_upsample(x)
             x = self.conv_last(self.upsample(x))
         elif self.upsampler == 'pixelshuffledirect':
             # for lightweight SR
             x = self.conv_first(x)
-            x1, attn = self.forward_features(x)
+            x1, attn_weight, raw_attn = self.forward_features(x)
             x = self.conv_after_body(x1) + x
             x = self.upsample(x)
         elif self.upsampler == 'nearest+conv':
             # for real-world SR
             x = self.conv_first(x)
-            x1, attn = self.forward_features(x)
+            x1, attn_weight, raw_attn = self.forward_features(x)
             x = self.conv_after_body(x1) + x
             x = self.conv_before_upsample(x)
             x = self.lrelu(self.conv_up1(torch.nn.functional.interpolate(x, scale_factor=2, mode='nearest')))
@@ -1021,14 +1172,15 @@ class StereoIR(nn.Module):
         else:
             # for image denoising and JPEG compression artifact reduction
             x_first = self.conv_first(x)
-            x1, attn = self.forward_features(x_first)
+            x1, attn_weight, raw_attn = self.forward_features(x_first)
             res = self.conv_after_body(x1) + x_first
             x = x + self.conv_last(res)
         
         feat_left, feat_right = x.chunk(2, dim=0)
-        M_right_to_left = attn['r2l']                             # (B*H) * Wl * Wr
-        M_left_to_right = attn['l2r']                  
-        return feat_left, feat_right, M_right_to_left, M_left_to_right
+        M_right_to_left = attn_weight[0]                             # (B*H) * Wl * Wr
+        M_left_to_right = attn_weight[1]
+        raw_attn = raw_attn.view(h, b//2, w, w).permute(1, 0, 2, 3)                                      # B* H * Wl * Wr                  
+        return feat_left, feat_right, M_right_to_left, M_left_to_right, raw_attn
 
 
 @register('ssrtr')

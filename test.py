@@ -30,25 +30,22 @@ def batched_predict(model, inp_left, inp_right, coord, cell, bsize, scale):
         preds_left = []
         preds_right = []
         disps1 = []
-        disps2 = []
         masks = []
         while ql < n:
             qr = min(ql + bsize, n)
             pred_left = model.query_rgb_left(coord[:, ql: qr, :], cell[:, ql: qr, :])
             pred_right = model.query_rgb_right(coord[:, ql: qr, :], cell[:, ql: qr, :])
-            pred_disp1,pred_disp2, mask = model.query_disp(coord[:, ql: qr, :], cell[:, ql: qr, :])
+            pred_disp1, mask = model.query_disp(coord[:, ql: qr, :], cell[:, ql: qr, :])
             preds_left.append(pred_left)
             preds_right.append(pred_right)
             disps1.append(pred_disp1)
-            disps2.append(pred_disp2)
             masks.append(mask)
             ql = qr
         pred_left = torch.cat(preds_left, dim=1)
         pred_right = torch.cat(preds_right, dim=1)
         disp1 = torch.cat(disps1, dim=1)
-        disp2 = torch.cat(disps2, dim=1)
         mask = torch.cat(masks, dim=1)
-    return pred_left, pred_right, (disp1, disp2, mask)
+    return pred_left, pred_right, (disp1, mask)
 
 
 def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsize=None, scale_max=4, fast=False,
@@ -108,7 +105,7 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         infer_time = time.time()-start_time
         
         pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
-        disp1,disp2, mask1 = pred_disp
+        disp1, mask1 = pred_disp
         pred_left.clamp_(0, 1)
         pred_right.clamp_(0, 1)
         

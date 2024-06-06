@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import models
 from models import register
 from utils import make_coord
-from .crossattention_arch import CrossScaleAttention
+# from .crossattention_arch import CrossScaleAttention
 from .arch_util import PositionalEncoding
 from .nafnet import CALayer, RDB, LayerNorm2d
 

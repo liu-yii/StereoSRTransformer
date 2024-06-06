@@ -2,7 +2,7 @@ train_dataset:
   dataset:
     name: stereo-image-folders
     args:
-      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/val/processed
+      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/train/processed
       root_path: E:/Research/Datasets/iPASSR/train/processed
       repeat: 20
       cache: in_memory
@@ -55,7 +55,7 @@ model:
     dispnet_spec:
       name: mlp
       args:
-        out_dim: 2
+        out_dim: 1
         hidden_list: [256, 256, 256]
     pb_spec:
       name: posenc

@@ -17,6 +17,7 @@ import models
 import utils
 from utils import warp, loss_disp_smoothness, warp_coord, denormalize
 from test import eval_psnr
+# torch.backends.cudnn.enabled = False
 
 
 def mixup(lq, gt, alpha=1.2):
@@ -117,10 +118,8 @@ def train(train_loader, model, optimizer, epoch):
         
         pred_left, pred_right, pred_disp = model(inp_left, inp_right, data['coord'], data['cell'], scale)
 
-        
-
         pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
-        disp1, disp2, mask1 = pred_disp
+        disp1, mask1 = pred_disp
         # M_l2r, M_r2l = attention_map
         # M_l2r, M_r2l = attention_map
         
@@ -129,12 +128,11 @@ def train(train_loader, model, optimizer, epoch):
         # h, w = hr_size[0][0], hr_size[1][0]
         # warp_left = warp_coord(hr_coord, hrl_d, right_img)
         warp_left = warp_coord(data['coord'], disp1, raw_right)
-        warp_right = warp_coord(data['coord'], disp2, raw_left, mode='l2r')
+        # warp_right = warp_coord(data['coord'], disp2, raw_left, mode='l2r')
         # left_warp_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
         # right_warp_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
 
-        loss_photo = loss_fn(warp_right, gt_right) + \
-            loss_fn(warp_left, gt_left)
+        loss_photo = loss_fn(warp_left, gt_left)
         
         # lr_right_warp = torch.matmul(M_l2r, inp_left.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         # lr_left_warp = torch.matmul(M_r2l, inp_right.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
@@ -146,7 +144,7 @@ def train(train_loader, model, optimizer, epoch):
         #     loss_fn(right_warp_warp, gt_right)
         # loss_smooth = loss_disp_smoothness(disp1, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
         
-        lambda_loss = 0.1
+        lambda_loss = 0.0
         loss = loss_rgb + lambda_loss * loss_photo
         # psnr = metric_fn(pred, gt)
         train_loss.add(loss.item())
