@@ -3,12 +3,9 @@ __pycache__/
 load/
 save/
 results/
-<<<<<<< HEAD
 pretrained_models/
+sceneflow_pretrained/
 
-=======
-pretrained_model/
->>>>>>> 1c27b76d8ae3aa080b47f79fd0323ba7974326e3
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/linux,python
