@@ -4,6 +4,8 @@ import os
 import time
 import shutil
 import math
+import re
+import sys
 
 import torch
 import torch.nn as nn
@@ -30,9 +32,11 @@ def resize_fn(img, size):
         transforms.ToPILImage(),
         transforms.Resize(size),
         transforms.ToTensor(),
-        transforms.Normalize(__imagenet_stats['mean'], __imagenet_stats['std'])
     ])
     return transformer(img)
+
+def normalize(img):
+    return transforms.Normalize(mean=__imagenet_stats['mean'], std=__imagenet_stats['std'])(img)
 
 def denormalize(img):
     """
@@ -43,10 +47,10 @@ def denormalize(img):
     """
 
     if isinstance(img, torch.Tensor):
-        # img = img.permute(1, 2, 0)  # H,W,C
+        img = img.permute(0, 2, 3, 1)  # H,W,C
         img *= torch.tensor(__imagenet_stats['std']).to(img.device)
         img += torch.tensor(__imagenet_stats['mean']).to(img.device)
-        return img
+        return img.permute(0, 3, 1, 2)
     else:
         img = img.transpose(1, 2, 0)  # H,W,C
         img *= np.array(__imagenet_stats['std'])
@@ -63,6 +67,73 @@ class NestedTensor(object):
         self.occ_mask_right = occ_mask_right
         self.sampled_cols = sampled_cols
         self.sampled_rows = sampled_rows
+
+
+def readPFM(file):
+    file = open(file, 'rb')
+
+    color = None
+    width = None
+    height = None
+    scale = None
+    endian = None
+
+    header = file.readline().rstrip()
+    if header.decode("ascii") == 'PF':
+        color = True
+    elif header.decode("ascii") == 'Pf':
+        color = False
+    else:
+        raise Exception('Not a PFM file.')
+
+    dim_match = re.match(r'^(\d+)\s(\d+)\s$', file.readline().decode("ascii"))
+    if dim_match:
+        width, height = list(map(int, dim_match.groups()))
+    else:
+        raise Exception('Malformed PFM header.')
+
+    scale = float(file.readline().decode("ascii").rstrip())
+    if scale < 0:  # little-endian
+        endian = '<'
+        scale = -scale
+    else:
+        endian = '>'  # big-endian
+
+    data = np.fromfile(file, endian + 'f')
+    shape = (height, width, 3) if color else (height, width)
+
+    data = np.reshape(data, shape)
+    data = np.flipud(data)
+    return data, scale
+
+def writePFM(file, image, scale=1):
+    file = open(file, 'wb')
+
+    color = None
+
+    if image.dtype.name != 'float32':
+        raise Exception('Image dtype must be float32.')
+
+    image = np.flipud(image)
+
+    if len(image.shape) == 3 and image.shape[2] == 3:  # color image
+        color = True
+    elif len(image.shape) == 2 or len(image.shape) == 3 and image.shape[2] == 1:  # greyscale
+        color = False
+    else:
+        raise Exception('Image must have H x W x 3, H x W x 1 or H x W dimensions.')
+
+    file.write('PF\n' if color else 'Pf\n'.encode())
+    file.write('%d %d\n'.encode() % (image.shape[1], image.shape[0]))
+
+    endian = image.dtype.byteorder
+
+    if endian == '<' or endian == '=' and sys.byteorder == 'little':
+        scale = -scale
+
+    file.write('%f\n'.encode() % scale)
+
+    image.tofile(file)
 
 
 def batched_index_select(source, dim, index):
@@ -264,7 +335,7 @@ def to_pixel_samples(img):
         img: Tensor, (3, H, W)
     """
     coord = make_coord(img.shape[-2:])
-    rgb = img.view(3, -1).permute(1, 0)
+    rgb = img.view(img.shape[0], -1).permute(1, 0)
     return coord, rgb
 
 def loss_disp_smoothness(disp, img, img_size=None):
@@ -320,15 +391,13 @@ def warp(img, disp, img_size=None, mode='l2r'):
     output = (output * mask).view(b, -1, h*w).permute(0, 2, 1)
     return output
 
-def warp_coord(coord, disp, raw_hr, mask=None, mode='r2l'):
+def warp_coord(coord, disp, raw_hr):
     '''
     Borrowed from:
     '''
     b, c, h, w = raw_hr.shape
     y_disp = torch.zeros_like(disp)
     disp = torch.cat((y_disp, disp * 2.0 / w), dim=-1)
-    if mode == 'l2r':
-        disp = -disp
     coord_warp = coord - disp        # b, h*w, 2
     # coord_warp = torch.cat((coord[:,:,0].unsqueeze(-1), disp * 2.0 / w - 1.0), dim=-1)
     coord_warp = coord_warp.clamp_(-1, 1)

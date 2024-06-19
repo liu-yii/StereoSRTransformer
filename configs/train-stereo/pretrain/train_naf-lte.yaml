@@ -2,41 +2,33 @@ train_dataset:
   dataset:
     name: stereo-image-folders-sceneflow
     args:
-      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/train/processed
-      # root_path: E:/Research/Datasets/iPASSR/train/kitti
       root_path: E:/Research/Datasets/SceneFlow/flythings
       cache: in_memory
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 160]
       scale_max: 4
       augment: true
       sample_q: 2304
-  batch_size: 12
+  batch_size: 16
 
 val_dataset:
   dataset:
     name: stereo-image-folders-sceneflow
     args:
-      # root_path: /mnt/Disk_2/liuyi/datasets/iPASSR/val/processed
-      # root_path: E:/Research/Datasets/iPASSR/val/kitti
       root_path: E:/Research/Datasets/SceneFlow/flythings
       phase: TEST
       first_k: 20
-      repeat: 160
       cache: in_memory
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 160]
       scale_max: 4
       sample_q: 2304
-  batch_size: 12
+  batch_size: 16
 
-data_norm:
-  inp: {sub: [0.5], div: [0.5]}
-  gt: {sub: [0.5], div: [0.5]}
 
 model:
   name: naflte_ours
@@ -73,14 +65,12 @@ optimizer:
   name: adam
   args:
     lr: 1.e-4
-epoch_max: 1000
-cosine_annealing:
-  eta_min: 1.e-7
+epoch_max: 15
 
 use_mixup: true
 phase: "train"
 epoch_val: 5
-epoch_save: 100
-save_dir: "results"
+epoch_save: 5
+save_dir: "sceneflow_pretrained"
 
-resume: ~ # save\naf-lte_2024-06-01\epoch-last.pth
+resume: ~

@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
-
+from glob import glob
+from utils import readPFM
 from datasets import register
-
 
 @register('image-folder')
 class ImageFolder(Dataset):
@@ -102,6 +102,56 @@ class StereoImageFolders(Dataset):
         self.cache = cache
         self.repeat = repeat
         self.cache = cache
+        
+        # if phase == 'train':
+        #     filenames = sorted(os.listdir(root_path))
+        filenames = os.listdir(root_path)
+        if first_k is not None:
+            filenames = filenames[:first_k]
+        
+        self.files = []
+        for filename in filenames:
+            file_l = os.path.join(root_path, filename + '/hr0.png')
+            file_r = os.path.join(root_path, filename + '/hr1.png')
+            file_disp = os.path.join(root_path, filename + '/disp_occ.png')
+
+            if cache == 'none':
+                self.files.append({
+                        'img_l': transforms.ToTensor()(Image.open(file_l).convert('RGB')),
+                        'img_r': transforms.ToTensor()(Image.open(file_r).convert('RGB')),
+                        'disp': transforms.ToTensor()(np.array(Image.open(file_disp)).astype(np.float32) / 256.),
+                        'filename': filename
+                    })
+
+            elif cache == 'in_memory':
+                self.files.append({
+                        'img_l': transforms.ToTensor()(Image.open(file_l).convert('RGB')),
+                        'img_r': transforms.ToTensor()(Image.open(file_r).convert('RGB')),
+                        'disp': transforms.ToTensor()(np.array(Image.open(file_disp)).astype(np.float32) / 256.),
+                        'filename': filename
+                    })
+
+    def __len__(self):
+        return len(self.files) * self.repeat
+
+    def __getitem__(self, idx):
+        x = self.files[idx % len(self.files)]
+
+        if self.cache == 'none':
+            return x
+
+        elif self.cache == 'in_memory':
+            return x
+        
+
+@register('stereo-image-folders-without-disp')
+class StereoImageFoldersTest(Dataset):
+    def __init__(self, root_path, split_file=None, split_key=None, first_k=None, phase='train',
+                 repeat=1, cache='none'):
+        self.repeat = repeat
+        self.cache = cache
+        self.repeat = repeat
+        self.cache = cache
 
         # if phase == 'train':
         #     filenames = sorted(os.listdir(root_path))
@@ -113,6 +163,7 @@ class StereoImageFolders(Dataset):
         for filename in filenames:
             file_l = os.path.join(root_path, filename + '/hr0.png')
             file_r = os.path.join(root_path, filename + '/hr1.png')
+            # file_disp = os.path.join(root_path, filename + '/disp_occ.png')
 
             if cache == 'none':
                 self.files.append({
@@ -139,3 +190,47 @@ class StereoImageFolders(Dataset):
 
         elif self.cache == 'in_memory':
             return x
+
+
+@register('stereo-image-folders-sceneflow')
+class StereoImageFolders(Dataset):
+    def __init__(self, root_path, split_file=None, split_key=None, first_k=None, phase='TRAIN',
+                 repeat=1, cache='none'):
+        self.repeat = repeat
+        self.cache = cache
+        self.repeat = repeat
+        self.cache = cache
+        
+        split = 'frames_cleanpass'
+        left_files = sorted(glob(root_path + '/' + split + '/' + phase + '/*/*/left/*.png'))
+        self.samples = []
+        for left_name in left_files:
+            sample = dict()
+            sample['left'] = left_name
+            sample['right'] = left_name.replace('/left/', '/right/')
+            sample['disp'] = left_name.replace(split, 'disparity')[:-4] + '.pfm'
+            sample['filename'] = left_name.split('/')[-1]
+            self.samples.append(sample)
+    
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples
+        file_l = sample[idx]['left']
+        file_r = sample[idx]['right']
+        file_disp = sample[idx]['disp']
+        filename = sample[idx]['filename']
+        x ={
+                'img_l': transforms.ToTensor()(Image.open(file_l).convert('RGB')),
+                'img_r': transforms.ToTensor()(Image.open(file_r).convert('RGB')),
+                'disp': transforms.ToTensor()(np.array(readPFM(file_disp)[0])),
+                'filename': filename
+            }
+
+        if self.cache == 'none':
+            return x
+
+        elif self.cache == 'in_memory':
+            return x
+        

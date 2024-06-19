@@ -2,138 +2,124 @@
 #
 #  Copyright (c) 2020. Johns Hopkins University - All rights reserved.
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import weight_norm
+from .ssrtr import LayerNorm2d
 
+class PCAM(nn.Module):
+    '''
+    Parallax Cross Attention Module (SCAM)
+    '''
+    def __init__(self, c):
+        super().__init__()
+        self.norm_l = LayerNorm2d(c)
+        self.norm_r = LayerNorm2d(c)
+        self.l_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+        self.r_proj1 = nn.Conv2d(c, c, kernel_size=1, stride=1, padding=0)
+        self.occ_head = nn.Sequential(
+            weight_norm(nn.Conv2d(1,c, kernel_size=3, padding=1)),
+            weight_norm(nn.Conv2d(c,c, kernel_size=3, padding=1)),
+            nn.ReLU(inplace=True),
+            weight_norm(nn.Conv2d(c, c, kernel_size=3, padding=1)),
+            weight_norm(nn.Conv2d(c, c, kernel_size=3, padding=1)),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c, 1, kernel_size=3, padding=1),
+            nn.Sigmoid()
+        )
+        self.phi = nn.Parameter(torch.tensor(0.0, requires_grad=True))  # dustbin cost
+        # self.stereonet = StereoNet(num_feats=c, maxdisp=96)
 
-class MultiheadAttentionRelative(nn.MultiheadAttention):
-    """
-    Multihead attention with relative positional encoding
-    """
-
-    def __init__(self, embed_dim, num_heads):
-        super(MultiheadAttentionRelative, self).__init__(embed_dim, num_heads, dropout=0.0, bias=True,
-                                                         add_bias_kv=False, add_zero_attn=False,
-                                                         kdim=None, vdim=None)
-
-    def forward(self, query, key, value, attn_mask=None, pos_enc=None, pos_indexes=None):
+    def _softmax(self, attn):
         """
-        Multihead attention
+        Alternative to optimal transport
 
-        :param query: [W,HN,C]
-        :param key: [W,HN,C]
-        :param value: [W,HN,C]
-        :param attn_mask: mask to invalidate attention, -inf is used for invalid attention, [W,W]
-        :param pos_enc: [2W-1,C]
-        :param pos_indexes: index to select relative encodings, flattened in transformer WW
-        :return: output value vector, attention with softmax (for debugging) and raw attention (used for last layer)
+        :param attn: raw attention weight, [N,H,W,W]
+        :return: updated attention weight, [N,H,W+1,W+1]
         """
+        bs, h, w, _ = attn.shape
 
-        w, bsz, embed_dim = query.size()
-        head_dim = embed_dim // self.num_heads
-        assert head_dim * self.num_heads == embed_dim, "embed_dim must be divisible by num_heads"
+        # add dustbins
+        similarity_matrix = torch.cat([attn, self.phi.expand(bs, h, w, 1).to(attn.device)], -1)
+        similarity_matrix = torch.cat([similarity_matrix, self.phi.expand(bs, h, 1, w + 1).to(attn.device)], -2)
 
-        # project to get qkv
-        if torch.equal(query, key) and torch.equal(key, value):
-            # self-attention
-            q, k, v = F.linear(query, self.in_proj_weight, self.in_proj_bias).chunk(3, dim=-1)
+        attn_softmax = F.softmax(similarity_matrix, dim=-1)
 
-        elif torch.equal(key, value):
-            # cross-attention
-            _b = self.in_proj_bias
-            _start = 0
-            _end = embed_dim
-            _w = self.in_proj_weight[_start:_end, :]
-            if _b is not None:
-                _b = _b[_start:_end]
-            q = F.linear(query, _w, _b)
+        return attn_softmax
 
-            if key is None:
-                assert value is None
-                k = None
-                v = None
-            else:
-                _b = self.in_proj_bias
-                _start = embed_dim
-                _end = None
-                _w = self.in_proj_weight[_start:, :]
-                if _b is not None:
-                    _b = _b[_start:]
-                k, v = F.linear(key, _w, _b).chunk(2, dim=-1)
+    def gen_pos_shift(self, w, device):
+        """
+        Compute relative difference between each pixel location from left image to right image, to be used to calculate
+        disparity
 
-        # project to find q_r, k_r
-        if pos_enc is not None:
-            # reshape pos_enc
-            pos_enc = torch.index_select(pos_enc, 0, pos_indexes).view(w, w,
-                                                                       -1)  # 2W-1xC -> WW'xC -> WxW'xC
-            # compute k_r, q_r
-            _start = 0
-            _end = 2 * embed_dim
-            _w = self.in_proj_weight[_start:_end, :]
-            _b = self.in_proj_bias[_start:_end]
-            q_r, k_r = F.linear(pos_enc, _w, _b).chunk(2, dim=-1)  # WxW'xC
+        :param w: image width
+        :param device: torch device
+        :return: relative pos shifts
+        """
+        pos_r = torch.linspace(0, w - 1, w)[None, None, None, :].to(device)  # 1 x 1 x 1 x W_right
+        pos_l = torch.linspace(0, w - 1, w)[None, None, :, None].to(device)  # 1 x 1 x W_left x1
+        pos = pos_l - pos_r
+        pos[pos < 0] = 0
+        return pos
+            
+    def gen_raw_disp(self, attn_weight, pos_shift, occ_mask = None):
+        # b, c, h, w = size
+        # find high response area
+        high_response = torch.argmax(attn_weight, dim=-1)  # NxHxW
+
+        # build 3 px local window
+        response_range = torch.stack([high_response - 1, high_response, high_response + 1], dim=-1)  # NxHxWx3
+
+        # attention with re-weighting
+        attn_weight_pad = F.pad(attn_weight, [1, 1], value=0.0)  # N x Hx W_left x (W_right+2)
+        attn_weight_rw = torch.gather(attn_weight_pad, -1, response_range + 1)  # offset range by 1, N x H x W_left x 3
+
+        # compute sum of attention
+        norm = attn_weight_rw.sum(-1, keepdim=True)
+        if occ_mask is None:
+            norm[norm < 0.1] = 1.0
         else:
-            q_r = None
-            k_r = None
+            norm[occ_mask, :] = 1.0  # set occluded region norm to be 1.0 to avoid division by 0
 
-        # scale query
-        scaling = float(head_dim) ** -0.5
-        q = q * scaling
-        if q_r is not None:
-            q_r = q_r * scaling
+        # re-normalize to 1
+        attn_weight_rw = attn_weight_rw / norm  # re-sum to 1
+        pos_pad = F.pad(pos_shift, [1, 1]).expand_as(attn_weight_pad)
+        pos_rw = torch.gather(pos_pad, -1, response_range + 1)
 
-        # reshape
-        q = q.contiguous().view(w, bsz, self.num_heads, head_dim)  # WxNxExC
-        if k is not None:
-            k = k.contiguous().view(-1, bsz, self.num_heads, head_dim)
-        if v is not None:
-            v = v.contiguous().view(-1, bsz, self.num_heads, head_dim)
+        # compute low res disparity
+        disp_pred_low_res = (attn_weight_rw * pos_rw)  # NxHxW
 
-        if q_r is not None:
-            q_r = q_r.contiguous().view(w, w, self.num_heads, head_dim)  # WxW'xExC
-        if k_r is not None:
-            k_r = k_r.contiguous().view(w, w, self.num_heads, head_dim)
+        return disp_pred_low_res.sum(-1), norm
 
-        # compute attn weight
-        attn_feat = torch.einsum('wnec,vnec->newv', q, k)  # NxExWxW'
+    def global_correlation_softmax_stereo(self, correlation):
+        # global correlation on horizontal direction
+        b, h, w, _ = correlation.shape
 
-        # add positional terms
-        if pos_enc is not None:
-            # 0.3 s
-            attn_feat_pos = torch.einsum('wnec,wvec->newv', q, k_r)  # NxExWxW'
-            attn_pos_feat = torch.einsum('vnec,wvec->newv', k, q_r)  # NxExWxW'
+        x_grid = torch.linspace(0, w - 1, w, device=correlation.device)  # [W]
+        
+        # mask subsequent positions to make disparity positive
+        mask = torch.triu(torch.ones((w, w)), diagonal=1).type_as(correlation)  # [W, W]
+        valid_mask = (mask == 0).unsqueeze(0).unsqueeze(0).repeat(b, h, 1, 1)  # [B, H, W, W]
+        correlation[~valid_mask] = -1e9
 
-            # 0.1 s
-            attn = attn_feat + attn_feat_pos + attn_pos_feat
-        else:
-            attn = attn_feat
+        prob = F.softmax(correlation, dim=-1)  # [B, H, W, W]
+        # prob = self._softmax(correlation)[..., :-1, :-1]
 
-        assert list(attn.size()) == [bsz, self.num_heads, w, w]
+        correspondence = (x_grid.view(1, 1, 1, w) * prob).sum(-1)  # [B, H, W]
 
-        # apply attn mask
-        if attn_mask is not None:
-            attn_mask = attn_mask[None, None, ...]
-            attn += attn_mask
+        # NOTE: unlike flow, disparity is typically positive
+        disparity = x_grid.view(1, 1, w).repeat(b, h, 1) - correspondence  # [B, H, W]
 
-        # raw attn
-        raw_attn = attn
+        return disparity, prob  # feature resolution
 
-        # softmax
-        attn = F.softmax(attn, dim=-1)
-
-        # compute v, equivalent to einsum('',attn,v),
-        # need to do this because apex does not support einsum when precision is mixed
-        v_o = torch.bmm(attn.view(bsz * self.num_heads, w, w),
-                        v.permute(1, 2, 0, 3).view(bsz * self.num_heads, w, head_dim))  # NxExWxW', W'xNxExC -> NExWxC
-        assert list(v_o.size()) == [bsz * self.num_heads, w, head_dim]
-        v_o = v_o.reshape(bsz, self.num_heads, w, head_dim).permute(2, 0, 1, 3).reshape(w, bsz, embed_dim)
-        v_o = F.linear(v_o, self.out_proj.weight, self.out_proj.bias)
-
-        # average attention weights over heads
-        attn = attn.sum(dim=1) / self.num_heads
-
-        # raw attn
-        raw_attn = raw_attn.sum(dim=1)
-
-        return v_o, attn, raw_attn
+    def forward(self, feat1, feat2, attn_weight):
+        b, c, h, w = feat1.shape
+        disp, prob = self.global_correlation_softmax_stereo(attn_weight)
+        disp = disp.clamp(min=0)  # positive disparity
+        
+        occ_mask = torch.sum(prob, dim=-1).view(b, 1, h, w)
+        occ = self.occ_head(occ_mask)
+        
+        return disp.unsqueeze(1), occ

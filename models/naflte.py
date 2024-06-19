@@ -40,8 +40,8 @@ class NAFLTE(nn.Module):
         
 
         
-        if self.non_local_attn:
-            self.cs_attn = CrossScaleAttention(channel=self.hidden_dim, scale=self.multi_scale)
+        # if self.non_local_attn:
+        #     self.cs_attn = CrossScaleAttention(channel=self.hidden_dim, scale=self.multi_scale)
         self.conv_v = nn.Conv2d(self.encoder.out_dim, self.hidden_dim, kernel_size=3, padding=1)
         if self.local_attn:
             self.conv_q = nn.Conv2d(self.encoder.out_dim, hidden_dim, kernel_size=3, padding=1)

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import yaml
 import torch
 from torchvision import transforms
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -29,23 +30,20 @@ def batched_predict(model, inp_left, inp_right, coord, cell, bsize, scale):
         ql = 0
         preds_left = []
         preds_right = []
-        disps1 = []
-        masks = []
+        preds_disp = []
         while ql < n:
             qr = min(ql + bsize, n)
             pred_left = model.query_rgb_left(coord[:, ql: qr, :], cell[:, ql: qr, :])
             pred_right = model.query_rgb_right(coord[:, ql: qr, :], cell[:, ql: qr, :])
-            pred_disp1, mask = model.query_disp(coord[:, ql: qr, :], cell[:, ql: qr, :])
+            pred_disp = model.query_disp(coord[:, ql: qr, :], cell[:, ql: qr, :])
             preds_left.append(pred_left)
             preds_right.append(pred_right)
-            disps1.append(pred_disp1)
-            masks.append(mask)
+            preds_disp.append(pred_disp)
             ql = qr
         pred_left = torch.cat(preds_left, dim=1)
         pred_right = torch.cat(preds_right, dim=1)
-        disp1 = torch.cat(disps1, dim=1)
-        mask = torch.cat(masks, dim=1)
-    return pred_left, pred_right, (disp1, mask)
+        pred_disp = torch.cat(preds_disp, dim=1)
+    return pred_left, pred_right, pred_disp
 
 
 def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsize=None, scale_max=4, fast=False,
@@ -53,18 +51,6 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
     if save_dir != None:
         os.makedirs(save_dir, exist_ok=True)
     model.eval()
-
-    # if data_norm is None:
-    #     data_norm = {
-    #         'inp': {'sub': [0], 'div': [1]},
-    #         'gt': {'sub': [0], 'div': [1]}
-    #     }
-    # t = data_norm['inp']
-    # inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
-    # inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
-    # t = data_norm['gt']
-    # gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
-    # gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
 
     if eval_type is None:
         metric_fn = partial(utils.calculate_psnr, crop_border=0)
@@ -82,14 +68,19 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
 
     pbar = tqdm(loader, leave=False, desc='val')
     for batch in pbar:
-        data, filename, scale = batch
-        scale = scale.cuda()
+        data, filename = batch
         for k, v in data.items():
             data[k] = v.cuda()
         filename = filename[0].split('.')[0]
-        inp_left, inp_right = torch.chunk(data['inp'], 2, dim=-1)
-        gt_left, gt_right = torch.chunk(data['gt'], 2, dim=-1)
-        # SwinIR Evaluation - reflection padding
+        inp_left, inp_right = torch.chunk(data['inp'], 2, dim=1)
+        gt_left, gt_right = torch.chunk(data['gt'], 2, dim=1)
+        # # GT color
+        # gt_l_rgb = F.grid_sample(gt_left, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+        #             .permute(0, 2, 1)
+        # gt_r_rgb = F.grid_sample(gt_right, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+        #             .permute(0, 2, 1)
+        scale = gt_left.shape[-1] / inp_left.shape[-1]
+
         _, _, h, w = inp_left.size()
         coord = data['coord']
         cell = data['cell']
@@ -103,54 +94,12 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
             else:
                 pred_left, pred_right, pred_disp = batched_predict(model, inp_left, inp_right, coord, cell*max(scale/scale_max, 1), eval_bsize, scale) # cell clip for extrapolation
         infer_time = time.time()-start_time
-        
-        pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
-        disp1, mask1 = pred_disp
-        pred_left.clamp_(0, 1)
-        pred_right.clamp_(0, 1)
-        
-        # for i, pred in enumerate([pred_left, pred_right]):   
-        #     if save_dir != None:
-        #         img = pred.view(scale*h, scale*w, 3).cpu().numpy()
-        #         img = (img * 255.0).round().astype(np.uint8)
-        #         img = Image.fromarray(img)
-        #         if i == 0:
-        #             img.save(f'{save_dir}/{filename}_L.png')
-        #         elif i == 1:
-        #             img.save(f'{save_dir}/{filename}_R.png')    
-        # if save_dir != None:
-        #     img = disp_l2r.view(scale*h, scale*w, 1).cpu().numpy()
-        #     img = (img).round().astype(np.uint8).squeeze(-1)
-        #     img = Image.fromarray(img,mode='L')
-        #     img.save(f'{save_dir}/{filename}_disp.png')
-        if save_dir != None:
-            save_imgs = {
-                        f'{save_dir}/{filename}_L.png': pred_left.view(int(scale*h), int(scale*w), 3),
-                        f'{save_dir}/{filename}_R.png': pred_right.view(int(scale*h), int(scale*w), 3),
-                        f'{save_dir}/{filename}_disp.png': disp1.view(int(scale*h), int(scale*w), 1)
-                    }
-            for path, img in save_imgs.items():
-                    img = img.cpu().numpy()
-                    # img = (img * 255.0).round().astype(np.uint8)
-                    if img.shape[-1] == 1:
-                        img = (img).round().astype(np.uint8).squeeze(-1)
-                        img = Image.fromarray(img, mode='L')
-                    else:
-                        img = (img * 255.0).round().astype(np.uint8)
-                        img = Image.fromarray(img)
-                    img.save(path)
-        
+
+           
         if eval_type is not None and fast == False: # reshape for shaving-eval
             # gt reshape
             ih, iw = inp_left.shape[-2:]
             iw = iw
-            s = math.sqrt(data['coord'].shape[1] / (ih * iw))
-            shape = [inp_left.shape[0], round(ih * s), round(iw * s), 3]
-            gt_left = gt_left.view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
-            gt_right = gt_right.view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
-            
             # prediction reshape
             s = math.sqrt(coord.shape[1] / (ih * iw))
             shape = [inp_left.shape[0], round(ih * s), round(iw * s), 3]
@@ -160,7 +109,12 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
             pred_right = pred_right.view(*shape) \
                 .permute(0, 3, 1, 2).contiguous()
             pred_right = pred_right[..., :gt_right.shape[-2], :gt_right.shape[-1]]
-            
+        gt_left = denormalize(gt_left)
+        gt_right = denormalize(gt_right)
+        pred_left = denormalize(pred_left)
+        
+        pred_right = denormalize(pred_right)
+        
         res_left = metric_fn(pred_left, gt_left)
         res_right = metric_fn(pred_right, gt_right)
         res_avg = (res_left + res_right) / 2
@@ -171,7 +125,26 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
 
         if verbose:
             pbar.set_description('val_left {:.4f}  val_right {:.4f}  val_avg {:.4f}  infer_time {:.4f}'.format(val_res_left.item(), val_res_right.item(), val_res_avg.item(), time_avg.item()))
-            
+        
+        pred_right.clamp_(0, 1)
+        pred_left.clamp_(0, 1)
+        if save_dir != None:
+            save_imgs = {
+                        f'{save_dir}/{filename}_L.png': pred_left.view(3, int(scale*h), int(scale*w)).permute(1,2,0),
+                        f'{save_dir}/{filename}_R.png': pred_right.view(3, int(scale*h), int(scale*w)).permute(1,2,0),
+                        f'{save_dir}/{filename}_disp.png': pred_disp.view(1, int(scale*h), int(scale*w)).permute(1,2,0),
+                    }
+            for path, img in save_imgs.items():
+                    img = img.cpu().numpy()
+                    # img = (img * 255.0).round().astype(np.uint8)
+                    if img.shape[-1] == 1:
+                        img = img.round().astype(np.uint8).squeeze(-1)
+                        img = Image.fromarray(img, mode='L')
+                    else:
+                        img = (img * 255.0).round().astype(np.uint8)
+                        img = Image.fromarray(img)
+                    img.save(path)
+
     return val_res_avg.item(), time_avg.item()
 
 

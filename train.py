@@ -1,5 +1,3 @@
-# modified from: https://github.com/yinboc/liif
-
 import argparse
 import os
 import random
@@ -8,6 +6,7 @@ import numpy as np
 import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
@@ -86,70 +85,50 @@ def prepare_training():
     return model, optimizer, epoch_start, lr_scheduler
 
 
-def train(train_loader, model, optimizer, epoch):
+def train(train_loader, model, optimizer, epoch, finetune = False):
     model.train()
     loss_fn = nn.L1Loss()
     train_loss = utils.Averager()
     train_loss_rgb = utils.Averager()
     train_loss_disp = utils.Averager()
     # metric_fn = utils.calc_psnr
-
-    # data_norm = config['data_norm']
-    # t = data_norm['inp']
-    # inp_sub = torch.FloatTensor(t['sub']).view(1, -1, 1, 1).cuda()
-    # inp_div = torch.FloatTensor(t['div']).view(1, -1, 1, 1).cuda()
-    # t = data_norm['gt']
-    # gt_sub = torch.FloatTensor(t['sub']).view(1, 1, -1).cuda()
-    # gt_div = torch.FloatTensor(t['div']).view(1, 1, -1).cuda()
     
     for batch in tqdm(train_loader, leave=False, desc='train'):
-        data, filename, scale = batch
-        scale = scale.cuda()
-
+        data, filename = batch
         for k, v in data.items():
             data[k] = v.cuda()
-        inp, gt, raw_hr = data['inp'], data['gt'], data['raw_hr']
-
+        inp, gt= data['inp'], data['gt']
         if config["phase"] == "train" and config["use_mixup"]:
             inp, gt = mixup(inp, gt)
-        inp_left, inp_right = torch.chunk(inp, 2, dim=-1)
-        gt_left, gt_right = torch.chunk(gt, 2, dim=-1)
-        raw_left, raw_right = torch.chunk(raw_hr, 2, dim=-1)
+        inp_left, inp_right = torch.chunk(inp, 2, dim=1)
+        # GT color
+        gt_left, gt_right = torch.chunk(gt, 2, dim=1)
+        gt_l_rgb = F.grid_sample(gt_left, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                    .permute(0, 2, 1)
+        gt_r_rgb = F.grid_sample(gt_right, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                    .permute(0, 2, 1)
+        scale = gt_left.shape[-1] / inp_left.shape[-1]
+        # GT disparity
+        if not finetune:
+            gt_disp = F.grid_sample(data['disp'], data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                    .permute(0, 2, 1)
+        else:
+            gt_disp = None
         
         pred_left, pred_right, pred_disp = model(inp_left, inp_right, data['coord'], data['cell'], scale)
-
-        pred_left, pred_right = denormalize(pred_left), denormalize(pred_right)
-        disp1, mask1 = pred_disp
-        # M_l2r, M_r2l = attention_map
-        # M_l2r, M_r2l = attention_map
-        
-        loss_rgb = loss_fn(pred_left, gt_left) + loss_fn(pred_right, gt_right)
-
-        # h, w = hr_size[0][0], hr_size[1][0]
-        # warp_left = warp_coord(hr_coord, hrl_d, right_img)
-        warp_left = warp_coord(data['coord'], disp1, raw_right)
-        # warp_right = warp_coord(data['coord'], disp2, raw_left, mode='l2r')
-        # left_warp_warp = warp_coord(data['coord'], disp_r2l, raw_right, hr_size, mode='r2l')
-        # right_warp_warp = warp_coord(data['coord'], disp_l2r, raw_left, hr_size)
-
-        loss_photo = loss_fn(warp_left, gt_left)
-        
-        # lr_right_warp = torch.matmul(M_l2r, inp_left.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # lr_left_warp = torch.matmul(M_r2l, inp_right.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # lr_right_warp_warp = torch.matmul(M_l2r, lr_left_warp.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # lr_left_warp_warp = torch.matmul(M_r2l, lr_right_warp.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # loss_ca = loss_fn(V_r2l*lr_right_warp, V_r2l*inp_right) + loss_fn(V_l2r*lr_left_warp, V_l2r*inp_left)
-        # loss_cycle = loss_fn(V_l2r*lr_left_warp_warp, V_l2r*inp_left) + loss_fn(V_r2l*lr_right_warp_warp, V_r2l*inp_right)
-        # loss_cycle = loss_fn(left_warp_warp, gt_left) + \
-        #     loss_fn(right_warp_warp, gt_right)
-        # loss_smooth = loss_disp_smoothness(disp1, pred_left, img_size=[h, w]) + loss_disp_smoothness(disp_r2l, pred_right, img_size=[h, w])
-        
-        lambda_loss = 0.0
-        loss = loss_rgb + lambda_loss * loss_photo
+        loss_rgb = loss_fn(pred_left, gt_l_rgb) + loss_fn(pred_right, gt_r_rgb)
+        warp_left = warp_coord(data['coord'], pred_disp, gt_right)
+        loss_unsupervised = loss_fn(warp_left, gt_l_rgb)
+        lambda_loss = 0.1
+        if not finetune:
+            loss_disp = loss_fn(pred_disp, gt_disp) + loss_unsupervised
+        else:
+            loss_disp = loss_unsupervised
+        loss = loss_rgb + lambda_loss * loss_disp
         # psnr = metric_fn(pred, gt)
         train_loss.add(loss.item())
         train_loss_rgb.add(loss_rgb.item())
-        train_loss_disp.add(loss_photo.item())
+        train_loss_disp.add(loss_disp.item())
 
         optimizer.zero_grad()
         loss.backward()
@@ -170,12 +149,6 @@ def main(config_, save_path):
         yaml.dump(config, f, sort_keys=False)
 
     train_loader, val_loader = make_data_loaders()
-    # if config.get('data_norm') is None:
-    #     config['data_norm'] = {
-    #         'inp': {'sub': [0], 'div': [1]},
-    #         'gt': {'sub': [0], 'div': [1]}
-    #     }
-
     model, optimizer, epoch_start, lr_scheduler = prepare_training()
 
     n_gpus = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
@@ -196,7 +169,7 @@ def main(config_, save_path):
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
         train_loss, train_loss_rgb, train_loss_disp = train(train_loader, model, optimizer, \
-                           epoch)
+                           epoch, finetune = config.get('finetune'))
         if lr_scheduler is not None:
             lr_scheduler.step()
 
@@ -231,7 +204,7 @@ def main(config_, save_path):
                 model_ = model
             val_res, _ = eval_psnr(val_loader, model_,
                 save_dir= None,
-                data_norm=config['data_norm'],
+                data_norm= None,
                 eval_type=config.get('eval_type'),
                 eval_bsize=config.get('eval_bsize'),
                 verbose=True)
@@ -270,11 +243,12 @@ if __name__ == '__main__':
         config = yaml.load(f, Loader=yaml.FullLoader)
         print('config loaded.')
 
+    save_dir = config['save_dir']
     save_name = args.name
     if save_name is None:
         save_name = os.path.split(args.config)[-1][:-len('.yaml')]
     if args.tag is not None:
         save_name += '_' + args.tag
-    save_path = os.path.join('./save', save_name)
+    save_path = os.path.join(save_dir, save_name)
     
     main(config, save_path)
