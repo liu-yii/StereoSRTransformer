@@ -42,7 +42,7 @@ def make_data_loader(spec, tag=''):
         log('  {}: shape={}'.format(k, tuple(v.shape)))
 
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        shuffle=(tag == 'train' or tag == 'val'), num_workers=8, pin_memory=True)
+        shuffle=(tag == 'train' or tag == 'val'), num_workers=0, pin_memory=True, collate_fn=dataset.collate_fn)
     return loader
 
 
@@ -93,50 +93,70 @@ def train(train_loader, model, optimizer, epoch, finetune = False):
     train_loss_disp = utils.Averager()
     # metric_fn = utils.calc_psnr
     
-    for batch in tqdm(train_loader, leave=False, desc='train'):
+    for idx, batch in enumerate(tqdm(train_loader, leave=False, desc='train')):
         data, filename = batch
         for k, v in data.items():
-            data[k] = v.cuda()
-        inp, gt= data['inp'], data['gt']
-        if config["phase"] == "train" and config["use_mixup"]:
-            inp, gt = mixup(inp, gt)
+            if isinstance(data[k], list):
+                for idx in range(len(data[k])):
+                    data[k][idx] = v[idx].cuda()
+            else:
+                if v is not None:
+                    data[k] = v.cuda()
+        inp = data['inp']
+        bs = len(inp)
+        scale = torch.Tensor([data['gt'][i].shape[-1] / inp[i].shape[-1] for i in range(bs)]).cuda()
+        inp = torch.stack(inp, dim=0)
+        coord = torch.stack(data['coord'], dim=0)
+        cell = torch.stack(data['cell'], dim=0)
+        # if config["phase"] == "train" and config["use_mixup"]:
+        #     inp, gt = mixup(inp, gt)
         inp_left, inp_right = torch.chunk(inp, 2, dim=1)
-        # GT color
-        gt_left, gt_right = torch.chunk(gt, 2, dim=1)
-        gt_l_rgb = F.grid_sample(gt_left, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
-                    .permute(0, 2, 1)
-        gt_r_rgb = F.grid_sample(gt_right, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
-                    .permute(0, 2, 1)
-        scale = gt_left.shape[-1] / inp_left.shape[-1]
-        # GT disparity
-        if not finetune:
-            gt_disp = F.grid_sample(data['disp'], data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
-                    .permute(0, 2, 1)
-        else:
-            gt_disp = None
         
-        pred_left, pred_right, pred_disp = model(inp_left, inp_right, data['coord'], data['cell'], scale)
-        loss_rgb = loss_fn(pred_left, gt_l_rgb) + loss_fn(pred_right, gt_r_rgb)
-        warp_left = warp_coord(data['coord'], pred_disp, gt_right)
-        loss_unsupervised = loss_fn(warp_left, gt_l_rgb)
-        lambda_loss = 0.1
-        if not finetune:
-            loss_disp = loss_fn(pred_disp, gt_disp) + loss_unsupervised
-        else:
-            loss_disp = loss_unsupervised
-        loss = loss_rgb + lambda_loss * loss_disp
-        # psnr = metric_fn(pred, gt)
-        train_loss.add(loss.item())
-        train_loss_rgb.add(loss_rgb.item())
-        train_loss_disp.add(loss_disp.item())
+        
+        pred_left, pred_right, pred_disp = model(inp_left, inp_right, coord, cell, scale)
+        losses = 0.0
+        for i in range(bs):
+            if i == bs - 1:
+                gt = data['gt'][i].unsqueeze(0)
+                coord = data['coord'][i].unsqueeze(0)
+                
+                # GT color
+                gt_left, gt_right = torch.chunk(gt, 2, dim=1)
+                gt_l_rgb = F.grid_sample(gt_left, coord.flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                            .permute(0, 2, 1)
+                gt_r_rgb = F.grid_sample(gt_right, coord.flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                            .permute(0, 2, 1)
+                
+                # GT disparity
+                if not finetune:
+                    disp = data['disp'][i].unsqueeze(0)
+                    gt_disp = F.grid_sample(disp, coord.flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
+                            .permute(0, 2, 1)
+                else:
+                    gt_disp = None
+                loss_rgb = loss_fn(pred_left[i].unsqueeze(0), gt_l_rgb) + loss_fn(pred_right[i].unsqueeze(0), gt_r_rgb)
+                warp_left = warp_coord(coord, pred_disp[i].unsqueeze(0), gt_right)
+                loss_unsupervised = loss_fn(warp_left, gt_l_rgb)
+                lambda_loss = 0.1
+                if not finetune:
+                    loss_disp = loss_fn(pred_disp[i].unsqueeze(0), gt_disp) + loss_unsupervised
+                else:
+                    loss_disp = loss_unsupervised
+                loss = loss_rgb + lambda_loss * loss_disp
+                # psnr = metric_fn(pred, gt)
+                train_loss.add(loss.item())
+                train_loss_rgb.add(loss_rgb.item())
+                train_loss_disp.add(loss_disp.item())
+                losses += loss
+        
 
         optimizer.zero_grad()
-        loss.backward()
+        losses.backward()
         optimizer.step()
 
         pred_left = None
         pred_right = None
-        loss = None
+        losses = None
         
     return train_loss.item(), train_loss_rgb.item(), train_loss_disp.item()
 

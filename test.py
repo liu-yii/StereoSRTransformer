@@ -70,20 +70,28 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
     for batch in pbar:
         data, filename = batch
         for k, v in data.items():
-            data[k] = v.cuda()
+            if isinstance(data[k], list):
+                for idx in range(len(data[k])):
+                    data[k][idx] = v[idx].cuda()
+            else:
+                if v is not None:
+                    data[k] = v.cuda()
         filename = filename[0].split('.')[0]
-        inp_left, inp_right = torch.chunk(data['inp'], 2, dim=1)
-        gt_left, gt_right = torch.chunk(data['gt'], 2, dim=1)
+        inp = torch.stack(data['inp'], dim=0)
+        gt = torch.stack(data['gt'], dim=0)
+        coord = torch.stack(data['coord'], dim=0)
+        cell = torch.stack(data['cell'], dim=0)
+        inp_left, inp_right = torch.chunk(inp, 2, dim=1)
+        gt_left, gt_right = torch.chunk(gt, 2, dim=1)
         # # GT color
         # gt_l_rgb = F.grid_sample(gt_left, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
         #             .permute(0, 2, 1)
         # gt_r_rgb = F.grid_sample(gt_right, data['coord'].flip(-1).unsqueeze(1), mode='nearest', padding_mode='border')[:, :, 0, :] \
         #             .permute(0, 2, 1)
-        scale = gt_left.shape[-1] / inp_left.shape[-1]
+        scale = torch.Tensor([gt_left.shape[-1] / inp_left.shape[-1]]).to(inp_left.device)
 
         _, _, h, w = inp_left.size()
-        coord = data['coord']
-        cell = data['cell']
+        
         start_time = time.time()    
         if eval_bsize is None:
             with torch.no_grad():
@@ -96,24 +104,24 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         infer_time = time.time()-start_time
 
            
-        if eval_type is not None and fast == False: # reshape for shaving-eval
-            # gt reshape
-            ih, iw = inp_left.shape[-2:]
-            iw = iw
-            # prediction reshape
-            s = math.sqrt(coord.shape[1] / (ih * iw))
-            shape = [inp_left.shape[0], round(ih * s), round(iw * s), 3]
-            pred_left = pred_left.view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
-            pred_left = pred_left[..., :gt_left.shape[-2], :gt_left.shape[-1]]
-            pred_right = pred_right.view(*shape) \
-                .permute(0, 3, 1, 2).contiguous()
-            pred_right = pred_right[..., :gt_right.shape[-2], :gt_right.shape[-1]]
+        # gt reshape
+        h_hr, w_hr = gt_left.shape[-2:]
+       
+        # # prediction reshape
+        shape = [inp_left.shape[0], h_hr, w_hr, 3]
+        pred_left = pred_left.view(*shape) \
+            .permute(0, 3, 1, 2).contiguous()
+        pred_right = pred_right.view(*shape) \
+            .permute(0, 3, 1, 2).contiguous()
+
+        
         gt_left = denormalize(gt_left)
         gt_right = denormalize(gt_right)
-        pred_left = denormalize(pred_left)
         
+        pred_left = denormalize(pred_left)
         pred_right = denormalize(pred_right)
+        pred_right.clamp_(0, 1)
+        pred_left.clamp_(0, 1)
         
         res_left = metric_fn(pred_left, gt_left)
         res_right = metric_fn(pred_right, gt_right)
@@ -126,13 +134,12 @@ def eval_psnr(loader, model, save_dir, data_norm=None, eval_type=None, eval_bsiz
         if verbose:
             pbar.set_description('val_left {:.4f}  val_right {:.4f}  val_avg {:.4f}  infer_time {:.4f}'.format(val_res_left.item(), val_res_right.item(), val_res_avg.item(), time_avg.item()))
         
-        pred_right.clamp_(0, 1)
-        pred_left.clamp_(0, 1)
+        
         if save_dir != None:
             save_imgs = {
-                        f'{save_dir}/{filename}_L.png': pred_left.view(3, int(scale*h), int(scale*w)).permute(1,2,0),
-                        f'{save_dir}/{filename}_R.png': pred_right.view(3, int(scale*h), int(scale*w)).permute(1,2,0),
-                        f'{save_dir}/{filename}_disp.png': pred_disp.view(1, int(scale*h), int(scale*w)).permute(1,2,0),
+                        f'{save_dir}/{filename}_L.png': pred_left.view(3, h_hr, w_hr).permute(1,2,0),
+                        f'{save_dir}/{filename}_R.png': pred_right.view(3, h_hr, w_hr).permute(1,2,0),
+                        f'{save_dir}/{filename}_disp.png': pred_disp.view(1, h_hr, w_hr).permute(1,2,0),
                     }
             for path, img in save_imgs.items():
                     img = img.cpu().numpy()
@@ -167,7 +174,7 @@ if __name__ == '__main__':
     dataset = datasets.make(spec['dataset'])
     dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        num_workers=8, pin_memory=True)
+        num_workers=8, pin_memory=True, collate_fn=dataset.collate_fn)
 
     model_spec = torch.load(args.model)['model']
     model = models.make(model_spec, load_sd=True).cuda()

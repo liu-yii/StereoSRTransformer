@@ -27,7 +27,23 @@ class SRImplicitStereo(Dataset):
         self.augment = augment
         self.sample_q = sample_q
         self.window_size = window_size
-        self.s = random.uniform(self.scale_min, self.scale_max)
+
+    def collate_fn(self, batch):
+        # batch is a list of sample tuples
+        inp = [item[0]['inp'] for item in batch]
+        coord = [item[0]['coord'] for item in batch]
+        cell = [item[0]['cell'] for item in batch]
+        gt = [item[0]['gt'] for item in batch]
+        disp = [item[0]['disp'] for item in batch]
+        filename = [item[1] for item in batch]
+
+        return {
+            'inp': inp,  # list of tensors of different sizes
+            'coord': coord,  # list of tensors of different sizes
+            'cell': cell,  # list of tensors of different sizes
+            'gt': gt,  # list of tensors of different sizes
+            'disp': disp
+        }, filename  # list of filenames 
 
     def __len__(self):
         return len(self.dataset)
@@ -39,7 +55,7 @@ class SRImplicitStereo(Dataset):
         filename = self.dataset[idx]['filename']
         disp = self.dataset[idx]['disp']
 
-        s = self.s
+        s = random.uniform(self.scale_min, self.scale_max)
         
         if self.inp_size is None:
             h_lr = math.floor(imgl.shape[-2] / s + 1e-9)
@@ -137,8 +153,23 @@ class SRImplicitStereoTest(Dataset):
         self.augment = augment
         self.sample_q = sample_q
         self.window_size = window_size
-        self.s = random.uniform(self.scale_min, self.scale_max)
+        # self.s = random.uniform(self.scale_min, self.scale_max)
 
+    def collate_fn(self, batch):
+        # batch is a list of sample tuples
+        inp = [item[0]['inp'] for item in batch]
+        coord = [item[0]['coord'] for item in batch]
+        cell = [item[0]['cell'] for item in batch]
+        gt = [item[0]['gt'] for item in batch]
+        filename = [item[1] for item in batch]
+
+        return {
+            'inp': inp,  # list of tensors of different sizes
+            'coord': coord,  # list of tensors of different sizes
+            'cell': cell,  # list of tensors of different sizes
+            'gt': gt  # list of tensors of different sizes
+        }, filename  # list of filenames 
+    
     def __len__(self):
         return len(self.dataset)
 
@@ -147,7 +178,7 @@ class SRImplicitStereoTest(Dataset):
         imgr = self.dataset[idx]['img_r']
         filename = self.dataset[idx]['filename']
 
-        s = self.s
+        s = random.uniform(self.scale_min, self.scale_max)
         
         if self.inp_size is None:
             h_lr = math.floor(imgl.shape[-2] / s + 1e-9)

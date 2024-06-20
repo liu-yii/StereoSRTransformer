@@ -26,8 +26,7 @@ val_dataset:
     args:
       inp_size: [32, 160]
       scale_max: 4
-      sample_q: 2304
-  batch_size: 16
+  batch_size: 1
 
 
 model:
@@ -71,6 +70,6 @@ use_mixup: true
 phase: "train"
 epoch_val: 5
 epoch_save: 5
-save_dir: "sceneflow_pretrained"
+save_dir: "pretrained_models"
 
 resume: ~

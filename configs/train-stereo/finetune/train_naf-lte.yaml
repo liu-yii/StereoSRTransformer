@@ -8,7 +8,7 @@ train_dataset:
   wrapper:
     name: sr-implicit-stereo-without-disp
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 96]
       scale_max: 4
       augment: true
       sample_q: 2304
@@ -25,10 +25,9 @@ val_dataset:
   wrapper:
     name: sr-implicit-stereo-without-disp
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 96]
       scale_max: 4
-      sample_q: 2304
-  batch_size: 16
+  batch_size: 1
 
 model:
   name: naflte_ours
@@ -77,4 +76,5 @@ epoch_val: 5
 epoch_save: 100
 save_dir: "save/finetuned"
 
-resume: sceneflow_pretrained\naf-lte_pretrained-06-19\epoch-last.pth
+resume: pretrained_models/naf-lte_pretrained/epoch-last.pth
+# resume: save/finetuned/naf-lte_finetune-06-20/epoch-last.pth

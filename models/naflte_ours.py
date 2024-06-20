@@ -62,7 +62,7 @@ class NAFLTEOURS(nn.Module):
         corelation = attn_weight[0].clone()
         disp, occ = self.pcam(feat_left, feat_right, corelation)
 
-        self.scale = scale
+        self.scale = scale[:,None,None,None].repeat(1,1,h,w)
         self.disp = disp
         self.feat_left = feat_left
         self.feat_right = feat_right

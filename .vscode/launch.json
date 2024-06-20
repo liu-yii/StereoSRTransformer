@@ -10,7 +10,7 @@
             "justMyCode": true,
             "args": [
                 "--config",
-                "configs/train-stereo/pretrain/train_naf-lte.yaml",
+                "configs/train-stereo/finetune/train_naf-lte.yaml",
                 "--name",
                 "naf-lte",
                 "--tag",
@@ -29,7 +29,7 @@
                 "--config",
                 "configs/test/test-flickr-2.yaml",
                 "--model",
-                "sceneflow_pretrained/naf-lte_pretrained-06-19/epoch-last.pth",
+                "pretrained_models/naf-lte_pretrained/epoch-last.pth",
                 "--gpu",
                 "0"
             ]
