@@ -7,11 +7,11 @@ train_dataset:
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [32, 160]
+      inp_size: [32, 96]
       scale_max: 4
       augment: true
       sample_q: 2304
-  batch_size: 16
+  batch_size: 12
 
 val_dataset:
   dataset:
@@ -24,13 +24,13 @@ val_dataset:
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [32, 160]
+      inp_size: [32, 96]
       scale_max: 4
   batch_size: 1
 
 
 model:
-  name: naflte_ours
+  name: stereoinr
   args:
     encoder_spec:
       name: nafnet
@@ -50,6 +50,7 @@ model:
       args:
         out_dim: 1
         hidden_list: [256, 256, 256]
+        act: "sine"
     pb_spec:
       name: posenc
       args:

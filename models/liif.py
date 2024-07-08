@@ -9,6 +9,7 @@ from utils import make_coord
 
 @register('liif')
 class LIIF(nn.Module):
+
     def __init__(self, encoder_spec, imnet_spec=None,
                  local_ensemble=True, feat_unfold=True, cell_decode=True):
         super().__init__()

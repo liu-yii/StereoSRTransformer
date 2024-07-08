@@ -8,7 +8,7 @@ train_dataset:
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 160]
       scale_max: 4
       augment: true
       sample_q: 2304
@@ -25,17 +25,16 @@ val_dataset:
   wrapper:
     name: sr-implicit-stereo
     args:
-      inp_size: [24, 96]
+      inp_size: [32, 160]
       scale_max: 4
-      sample_q: 2304
-  batch_size: 12
+  batch_size: 1
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}
   gt: {sub: [0.5], div: [0.5]}
 
 model:
-  name: naflte_ours
+  name: stereoinr
   args:
     encoder_spec:
       name: ssrtr
@@ -74,7 +73,7 @@ use_mixup: False
 phase: "train"
 epoch_val: 5
 epoch_save: 100
-save_dir: "results"
+save_dir: "save/finetuned"
 
-# resume: ~
+resume: pretrained_models/ssrtr-lte_pretrained/epoch-last.pth
 # resume: save/ssrtr-lte_2024-06-15/epoch-last.pth

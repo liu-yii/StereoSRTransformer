@@ -25,15 +25,14 @@ val_dataset:
     args:
       inp_size: [32, 160]
       scale_max: 4
-      sample_q: 2304
-  batch_size: 8
+  batch_size: 1
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}
   gt: {sub: [0.5], div: [0.5]}
 
 model:
-  name: naflte_ours
+  name: stereoinr
   args:
     encoder_spec:
       name: ssrtr
@@ -64,16 +63,11 @@ optimizer:
   args:
     lr: 2.e-4
 epoch_max: 15
-# cosine_annealing:
-#   eta_min: 1.e-7
-multi_step_lr:
-  milestones: [800, 850, 900, 950]
-  gamma: 0.5
 
 use_mixup: False
 epoch_val: 5
 epoch_save: 5
-save_dir: "sceneflow_pretrained"
+save_dir: "pretrained_models"
 
 # resume: ~
 # resume: save/ssrtr-lte_2024-06-15/epoch-last.pth

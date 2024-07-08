@@ -12,7 +12,7 @@ train_dataset:
       scale_max: 4
       augment: true
       sample_q: 2304
-  batch_size: 16
+  batch_size: 8
 
 val_dataset:
   dataset:
@@ -30,7 +30,7 @@ val_dataset:
   batch_size: 1
 
 model:
-  name: naflte_ours
+  name: stereoinr
   args:
     encoder_spec:
       name: nafnet
@@ -50,6 +50,7 @@ model:
       args:
         out_dim: 1
         hidden_list: [256, 256, 256]
+        act: "sine"
     pb_spec:
       name: posenc
       args:
@@ -76,5 +77,5 @@ epoch_val: 5
 epoch_save: 100
 save_dir: "save/finetuned"
 
-resume: pretrained_models/naf-lte_pretrained/epoch-last.pth
-# resume: save/finetuned/naf-lte_finetune-06-20/epoch-last.pth
+# resume: pretrained_models/naf-lte_pretrain-07-03-2/epoch-last.pth
+# resume: save/finetuned/naf-lte_finetune-06-30/epoch-last.pth

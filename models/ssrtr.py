@@ -13,7 +13,7 @@ from models import register
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 # from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from einops import rearrange, repeat
-from .positionencoder import PositionEmbeddingSine
+# from .positionencoder import PositionEncodingSine
 from torch.utils.checkpoint import checkpoint
 
 class LayerNormFunction(torch.autograd.Function):
@@ -739,12 +739,12 @@ class UpsampleOneStep(nn.Sequential):
     #     flops = H * W * self.num_feat * 3 * 9
     #     return flops
         
-def feature_add_position(feature, feature_channels):
-    pos_enc = PositionEmbeddingSine(num_pos_feats=feature_channels // 2)
-    position = pos_enc(feature)
+# def feature_add_position(feature, feature_channels):
+#     pos_enc = PositionEmbeddingSine(num_pos_feats=feature_channels // 2)
+#     position = pos_enc(feature)
 
-    feature = feature + position
-    return feature
+#     feature = feature + position
+#     return feature
 
 class StereoIR(nn.Module):
     r""" 
@@ -826,6 +826,7 @@ class StereoIR(nn.Module):
         # if self.rpe:
         #     self.pos_encoder = PositionEncodingSine1DRelative(embed_dim)
         # absolute position embedding
+        # self.pos_encoder = PositionEncodingSine(embed_dim)
         if self.ape:
             self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
             trunc_normal_(self.absolute_pos_embed, std=.02)
@@ -935,19 +936,14 @@ class StereoIR(nn.Module):
             torch.zeros(b//2, h, w, w).cuda(),
             torch.zeros(b//2, h, w, w).cuda()
             ]
-        if self.ape:
-            x = feature_add_position(x, c)
         x = self.patch_embed(x)
         x = self.pos_drop(x)
-
-        # if self.rpe:
-        #     pos_enc = self.pos_encoder(x)
         
         for i, layer in enumerate(self.layers):
             x = layer(x, x_size)
             x, attn_weight = self.scam_layer[i](x, x_size)
-            cost[0] += attn_weight[0]
-            cost[1] += attn_weight[1]
+            cost[0] = attn_weight[0]
+            cost[1] = attn_weight[1]
 
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)

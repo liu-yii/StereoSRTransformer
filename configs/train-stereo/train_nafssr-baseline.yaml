@@ -1,63 +1,61 @@
 train_dataset:
   dataset:
-    name: image-folder
+    name: stereo-image-folder
     args:
-      root_path: ./load/div2k/DIV2K_train_HR
+      root_path: E:/Research/Datasets/iPASSR/train/processed
       repeat: 20
       cache: in_memory
   wrapper:
-    name: sr-implicit-downsampled
+    name: stereo-sr-implicit-downsampled
     args:
-      inp_size: 48
+      inp_size: [30, 90]
       scale_max: 4
       augment: true
       sample_q: 2304
-  batch_size: 32
+  batch_size: 16
 
 val_dataset:
   dataset:
-    name: image-folder
+    name: stereo-image-folder
     args:
-      root_path: ./load/div2k/DIV2K_valid_HR
+      root_path: E:/Research/Datasets/iPASSR/val/processed
       first_k: 10
       repeat: 160
       cache: in_memory
   wrapper:
-    name: sr-implicit-downsampled
+    name: stereo-sr-implicit-downsampled
     args:
-      inp_size: 48
+      inp_size: [30, 90]
       scale_max: 4
       sample_q: 2304
-  batch_size: 32
+  batch_size: 16
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}
   gt: {sub: [0.5], div: [0.5]}
 
 model:
-  name: lte
+  name: stereoinr
   args:
     encoder_spec:
-      name: swinir
+      name: nafnet
       args:
         no_upsampling: true
     imnet_spec:
       name: mlp
       args:
-        out_dim: 3
         hidden_list: [256, 256, 256]
     hidden_dim: 256
 
 optimizer:
   name: adam
   args:
-    lr: 2.e-4
+    lr: 1.e-3
 epoch_max: 1000
-multi_step_lr:
-  milestones: [500, 800, 900, 950]
-  gamma: 0.5
+cosine_annealing:
+  eta_min: 1.e-7
 
-epoch_val: 1
+epoch_val: 5
 epoch_save: 100
 
-resume: ./save/_train_swinir-lte/epoch-last.pth
+resume: ./save/stereoinr_07-08-crosstr/epoch-last.pth

@@ -12,7 +12,6 @@ from .nafnet import CALayer, RDB, LayerNorm2d
 import numpy as np
 
 
-
 @register('naflte')
 class NAFLTE(nn.Module):
 

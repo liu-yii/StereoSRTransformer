@@ -1,0 +1,21 @@
+test_dataset:
+  dataset:
+    name: stereo-image-folders-without-disp
+    args:
+      # root_path: E:\Research\Datasets\iPASSR\test\Flickr1024\hr
+      root_path: E:/Research/Datasets/iPASSR/test/Middlebury/hr
+  wrapper:
+    name: sr-implicit-stereo-without-disp
+    args: 
+      scale_min: 2
+      window_size: 8
+  batch_size: 1 
+eval_type: test-2
+eval_bsize: 30000
+save_dir: "results/flickr-x2"
+
+data_norm:
+  inp: {sub: [0.5], div: [0.5]}
+  gt: {sub: [0.5], div: [0.5]}
+
+  

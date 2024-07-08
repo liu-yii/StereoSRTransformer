@@ -10,7 +10,7 @@
             "justMyCode": true,
             "args": [
                 "--config",
-                "configs/train-stereo/finetune/train_naf-lte.yaml",
+                "configs/train-stereo/train_nafssr-baseline.yaml",
                 "--name",
                 "naf-lte",
                 "--tag",
