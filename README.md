@@ -1,19 +1,19 @@
-# Local Texture Estimator for Implicit Representation Function
+# StereoINR
 
-This repository contains the official implementation for LTE introduced in the following paper:
+This repository contains the official implementation for StereoINR introduced in the following paper:
 
-[**Local Texture Estimator for Implicit Representation Function**](https://ipl.dgist.ac.kr/LTE_cvpr.pdf) (CVPR 2022)
+[**StereoINR**]
 
 
 ## Installation
 
-Our code is based on Ubuntu 20.04, pytorch 1.10.0, CUDA 11.3 (NVIDIA RTX 3090 24GB, sm86) and python 3.6.
+Our code is based on Ubuntu 22.04, pytorch 2.1.2, CUDA 12.1 (NVIDIA RTX 4090 24GB) and python 3.10.
 
 We recommend using [conda](https://www.anaconda.com/distribution/) for installation:
 
 ```
 conda env create --file environment.yaml
-conda activate lte
+conda activate stereoinr
 ```
 
 
@@ -83,19 +83,22 @@ SwinIR-LIIF|[Google Drive](https://drive.google.com/file/d/1TvXXvimq-FlVB6tOye5J
 
 **Test**: `python test.py --config configs/test/test-div2k-2.yaml --model save/_train_swinir-lte/epoch-last.pth --window 8 --gpu 0`
 
+
+### **Stereo-INR**
+
+**Train**: `python train.py --config configs/train-stereo/train_nafssr-baseline.yaml --name stereoinr --tag 07-28 --gpu 0`
+
+**Test**: `python test.py --config configs/test/test-flickr-2.yaml --model save/stereoinr_07-28/epoch-last.pth --gpu 0`
+
+
+
 Model|Training time (# GPU)
 :-:|:-:
 EDSR-baseline-LTE|21h (1 GPU)
 RDN-LTE|82h (2 GPU)
 SwinIR-LTE|75h (4 GPU)
 
-We use NVIDIA RTX 3090 24GB for training.
-
-
-## Fourier Space
-
-The script [Eval-Fourier-Feature-Space](https://github.com/jaewon-lee-b/lte/blob/main/Eval-Fourier-Feature-Space.ipynb) is used to generate the paper plots.
-
+We use NVIDIA RTX 4090 24GB for training.
 
 ## Demo
 
@@ -103,19 +106,6 @@ The script [Eval-Fourier-Feature-Space](https://github.com/jaewon-lee-b/lte/blob
 
 
 ## Citation
-
-If you find our work useful in your research, please consider citing our paper:
-
-```
-@InProceedings{lte-jaewon-lee,
-    author    = {Lee, Jaewon and Jin, Kyong Hwan},
-    title     = {Local Texture Estimator for Implicit Representation Function},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2022},
-    pages     = {1929-1938}
-}
-```
 
 
 ## Acknowledgements
