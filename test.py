@@ -4,6 +4,7 @@ import math
 from functools import partial
 
 import yaml
+import time
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -17,24 +18,34 @@ import numpy as np
 
 def batched_predict(model, inp, coord, cell, bsize):
     with torch.no_grad():
+        start_time = time.time()
         feat_left, feat_right, corr = model.gen_feat(inp)
+        gen_feat_time = time.time()
+        time1 = gen_feat_time - start_time
         raw_disp, refined_left, refined_right = model.refine_corr(feat_left, feat_right, corr)
+        refine_time = time.time()
+        time2 = refine_time - gen_feat_time
         inp_l, inp_r = inp.chunk(2, dim=1)
         n = coord.shape[1]
         ql = 0
         preds_l = []
         preds_r = []
+        disps = []
         while ql < n:
             qr = min(ql + bsize, n)
-            pred_r,_ = model.query_rgb(inp_r, refined_right, raw_disp, coord[:, ql: qr, :], cell[:, ql: qr, :])
-            preds_r.append(pred_r)
-            pred_l, disp = model.query_rgb(inp_l, refined_left, raw_disp, coord[:, ql: qr, :], cell[:, ql: qr, :])
-            preds_l.append(pred_l)
+            pred_r,_ = model.query_rgb(inp_r, refined_right, coord[:, ql: qr, :], cell[:, ql: qr, :])
+            preds_r.append(pred_r.detach().cpu())
+            pred_l, disp = model.query_rgb(inp_l, refined_left, coord[:, ql: qr, :], cell[:, ql: qr, :])
+            preds_l.append(pred_l.detach().cpu())
+            disps.append(disp.detach().cpu())
+            del pred_r, pred_l, disp
+            torch.cuda.empty_cache()
             ql = qr
         pred_l = torch.cat(preds_l, dim=1)
         pred_r = torch.cat(preds_r, dim=1)
+        pred_disp = torch.cat(disps, dim=1)
         pred = torch.cat([pred_l, pred_r], dim=-1)
-    return pred
+    return pred.cuda(), pred_disp.cuda()
 
 
 def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, window_size=0, scale_max=4, fast=False,
@@ -95,24 +106,40 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
             with torch.no_grad():
                 out = model(inp, coord, cell)
                 pred = out['out_rgb']
-
+                pred_disp = out['disp']
         else:
             if fast:
-                out = model(inp, coord, cell*max(scale/scale_max, 1))
-                pred = out['out_rgb']
+                with torch.no_grad():
+                    out = model(inp, coord, cell*max(scale/scale_max, 1))
+                    pred = out['out_rgb']
+                    pred_disp = out['disp']
             else:
-                pred = batched_predict(model, inp, coord, cell*max(scale/scale_max, 1), eval_bsize) # cell clip for extrapolation
+                pred, pred_disp = batched_predict(model, inp, coord, cell*max(scale/scale_max, 1), eval_bsize) # cell clip for extrapolation
             
         pred = pred * gt_div + gt_sub
         pred.clamp_(0, 1)
         pred_l, pred_r = pred.chunk(2, dim=-1)
         gt_left, gt_right = batch['gt'].chunk(2, dim=-1)
         if eval_type is not None: 
-            img = pred_l.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
-            img = (img * 255.0).round().astype(np.uint8)
-            img = Image.fromarray(img)
-            
-            img.save(f'results/0.png')
+            idx = 1
+            # img_l
+            img_l = pred_l.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
+            img_l = (img_l * 255.0).round().astype(np.uint8)
+            img_l = Image.fromarray(img_l)
+            img_l.save('results/{:0>4d}_l.png'.format(idx))
+            # img_r
+            img_r = pred_r.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
+            img_r = (img_r * 255.0).round().astype(np.uint8)
+            img_r = Image.fromarray(img_r)
+            img_r.save('results/{:0>4d}_r.png'.format(idx))
+
+            # img_disp
+            img_disp = pred_disp.clamp_(0).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 1).cpu().numpy()
+            img_disp = img_disp.round().astype(np.uint8)
+            img_disp = Image.fromarray(img_disp[:,:,0], mode='L')
+            img_disp.save('results/{:0>4d}_disp.png'.format(idx))
+
+            idx += 1
         if eval_type is not None and fast == False: # reshape for shaving-eval
             # gt reshape
             ih, iw = batch['inp'].shape[-2:]

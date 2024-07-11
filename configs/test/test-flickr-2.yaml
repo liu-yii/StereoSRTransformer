@@ -11,7 +11,7 @@ test_dataset:
       # window_size: 8
   batch_size: 1 
 eval_type: benchmark-2
-eval_bsize: 30000
+eval_bsize: 5000
 save_dir: "results/flickr-x2"
 
 data_norm:

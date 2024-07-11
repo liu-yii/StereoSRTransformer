@@ -29,7 +29,7 @@
                 "--config",
                 "configs/test/test-flickr-2.yaml",
                 "--model",
-                "pretrained_models/naf-lte_pretrained/epoch-last.pth",
+                "save/stereoinr_07-28/epoch-last.pth",
                 "--gpu",
                 "0"
             ]

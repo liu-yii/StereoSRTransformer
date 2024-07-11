@@ -30,24 +30,18 @@ class StereoINR(nn.Module):
         self.pe = PositionEncoder(posenc_type='sinusoid',complex_transform=False, enc_dims=hidden_dim, hidden_dims=hidden_dim//2)
 
     def gen_feat(self, inp):
-        self.inp_l, self.inp_r = inp.chunk(2, dim=1)
-        x = torch.cat((self.inp_l, self.inp_r), dim=0)
-        self.feat_coord = make_coord(self.inp_l.shape[-2:], flatten=False).cuda() \
-            .permute(2, 0, 1) \
-            .unsqueeze(0).expand(self.inp_l.shape[0], 2, *self.inp_l.shape[-2:])
+        inp_l, inp_r = inp.chunk(2, dim=1)
+        x = torch.cat((inp_l, inp_r), dim=0)
         feat_left, feat_right, attn_weight = self.encoder(x)
         # disp = self.cat(attn_weight, feat_left, feat_right)
-        self.M_right_to_left, self.M_left_to_right = attn_weight
-
-        self.feat_left = feat_left
-        self.feat_right = feat_right
-        
-        return feat_left, feat_right, self.M_right_to_left
+        M_right_to_left, _ = attn_weight
+        return feat_left, feat_right, M_right_to_left
     
     def refine_corr(self, feat_l, feat_r, corr): 
-        pos_enc = self.pos_encoder(self.inp_l)  # [2w-1, c]
-        self.raw_disp, out_left, out_right = self.corr_refine(corr, feat_l, feat_r, pos_enc)
-        return self.raw_disp, out_left, out_right
+        pos_enc = self.pos_encoder(feat_l)  # [2w-1, c]
+        raw_disp, out_left, out_right = self.corr_refine(corr, feat_l, feat_r, pos_enc)
+        self.raw_disp = raw_disp
+        return raw_disp, out_left, out_right
 
     
     def query_rgb(self, lr, feat, coord, cell = None):
@@ -65,7 +59,7 @@ class StereoINR(nn.Module):
 
         scale = 2/(cell + 1e-6)[:,0,1]/feat.shape[-1]
         scale = scale[:,None,None,None]
-        disp = self.raw_disp*scale
+        disp = self.raw_disp * scale
         # normalize disparity
         eps = 1e-6
         mean_disp = torch.mean(disp, dim=(1,2,3), keepdim=True)
@@ -162,20 +156,27 @@ class StereoINR(nn.Module):
         return rgb, disp
 
     
-    def warp(self, disp, coord, cell):
-        with torch.no_grad():
-            warp_coord = warp_grid(coord, disp, cell) 
-            warp_r, _ = self.query_rgb(self.inp_l, self.feat_left, warp_coord, cell)
+    def warp(self, inp, feat, disp, coord, cell):
+        warp_coord = warp_grid(coord, disp, cell) 
+        warp_r, _ = self.query_rgb(inp, feat, warp_coord, cell)
         return warp_r
     
     def forward(self, inp, coord, cell):
         out = {}
-        self.gen_feat(inp)
-        raw_disp, out_left, out_right = self.refine_corr(self.feat_left, self.feat_right, self.M_right_to_left)
-        out_l, disp = self.query_rgb(self.inp_l, out_left, coord, cell)
-        out_r, _ = self.query_rgb(self.inp_r, out_right, coord, cell)
+        inp_l, inp_r = inp.chunk(2, dim=1)
+        feat_left, feat_right, M_right_to_left = self.gen_feat(inp)
+        raw_disp, out_left, out_right = self.refine_corr(feat_left, feat_right, M_right_to_left)
+        # self.feat_left, self.feat_right = out_left, out_right
+
+        out_l, disp = self.query_rgb(inp_l, out_left, coord, cell)
+        out_r, _ = self.query_rgb(inp_r, out_right, coord, cell)
 
         out_rgb = torch.cat((out_l, out_r), dim=-1)
         out['out_rgb'] = out_rgb
         out['disp'] = disp
+        # warp for disparity loss (training)
+        if self.training:
+            with torch.no_grad():
+                warp_r = self.warp(inp_l, out_left, disp, coord, cell)
+            out['warp_r'] = warp_r
         return out

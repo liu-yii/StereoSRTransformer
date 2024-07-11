@@ -105,10 +105,9 @@ def train(train_loader, model, optimizer, \
         gt_l, gt_r = gt.chunk(2, dim=-1)
         loss = loss_fn(pred_l, gt_l) + loss_fn(pred_r, gt_r)
 
-        # disparity loss
-        warp_r = model.warp(pred_disp, batch['coord'], batch['cell'])
+        warp_r = pred['warp_r']
         loss_warp = loss_fn(warp_r, gt_r)
-        loss = loss + 0.1*loss_warp
+        loss = loss + 0.1 * loss_warp
         psnr = metric_fn(pred['out_rgb'], gt)
         
         # tensorboard

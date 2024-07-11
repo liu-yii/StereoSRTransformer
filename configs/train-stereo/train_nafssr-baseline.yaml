@@ -58,4 +58,4 @@ cosine_annealing:
 epoch_val: 5
 epoch_save: 100
 
-resume: ./save/stereoinr_07-08-crosstr/epoch-last.pth
+resume: ./save/stereoinr_07-08-crosstr/epoch-best.pth
