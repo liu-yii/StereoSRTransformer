@@ -6,14 +6,13 @@ import torch.nn.functional as F
 import models
 from models import register
 from utils import make_coord, warp_grid
-from models.crossattention import CAT
-from models.crossarch import dispnet
+from models.crossarch import dispnet, dispnet_norefine
 from models.positionencoder import PositionEncoder, PositionEncodingSine1DRelative
 
 
 @register('stereoinr')
 class StereoINR(nn.Module):
-    def __init__(self, encoder_spec, imnet_spec=None,dispnet_spec=None, hidden_dim=128, pb_spec = None, pe_spec = None):
+    def __init__(self, encoder_spec, imnet_spec=None,dispnet_spec=None, hidden_dim=256, pb_spec = None, pe_spec = None):
         super().__init__()    
         self.hidden_dim = hidden_dim
 
@@ -21,8 +20,8 @@ class StereoINR(nn.Module):
         self.encoder = models.make(encoder_spec)
         self.coef = nn.Conv2d(self.encoder.out_dim, hidden_dim, 3, padding=1)
         self.freq = nn.Conv2d(self.encoder.out_dim, hidden_dim, 3, padding=1)
-        # self.cat = CAT(feature_size=[30,90], proj_dim=166)
-        self.corr_refine = dispnet(hidden_dim = self.encoder.out_dim, nhead = 8, num_attn_layers = 4)
+        self.corr_refine = dispnet(hidden_dim = self.encoder.out_dim, nhead = 4, num_attn_layers = 2)
+        # self.corr_refine = dispnet_norefine(hidden_dim = self.encoder.out_dim, nhead = 4, num_attn_layers = 4)
         self.pos_encoder = PositionEncodingSine1DRelative(self.encoder.out_dim, normalize=False)
         self.phase = nn.Linear(2, hidden_dim, bias=False)
         self.imnet = models.make(imnet_spec, args={'in_dim': hidden_dim, 'out_dim': 3})
@@ -33,7 +32,6 @@ class StereoINR(nn.Module):
         inp_l, inp_r = inp.chunk(2, dim=1)
         x = torch.cat((inp_l, inp_r), dim=0)
         feat_left, feat_right, attn_weight = self.encoder(x)
-        # disp = self.cat(attn_weight, feat_left, feat_right)
         M_right_to_left, _ = attn_weight
         return feat_left, feat_right, M_right_to_left
     
@@ -44,7 +42,7 @@ class StereoINR(nn.Module):
         return raw_disp, out_left, out_right
 
     
-    def query_rgb(self, lr, feat, coord, cell = None):
+    def query_rgb(self, lr, feat, coord, cell = None, raw_disp = None):
         """
         Query RGB image based on relative position shift
 
@@ -56,15 +54,17 @@ class StereoINR(nn.Module):
         """
         coef = self.coef(feat)
         freq = self.freq(feat)
+        if raw_disp is not None:
+            scale = 2/(cell + 1e-6)[:,0,1]/feat.shape[-1]
+            scale = scale[:,None,None,None]
+            disp = raw_disp * scale
+            # normalize disparity
+            eps = 1e-6
+            mean_disp = torch.mean(disp, dim=(1,2,3), keepdim=True)
+            std_disp = torch.std(disp, dim=(1,2,3), keepdim=True) + eps
+            disp_normalized = (disp - mean_disp) / std_disp
 
-        scale = 2/(cell + 1e-6)[:,0,1]/feat.shape[-1]
-        scale = scale[:,None,None,None]
-        disp = self.raw_disp * scale
-        # normalize disparity
-        eps = 1e-6
-        mean_disp = torch.mean(disp, dim=(1,2,3), keepdim=True)
-        std_disp = torch.std(disp, dim=(1,2,3), keepdim=True) + eps
-        disp_normalized = (disp - mean_disp) / std_disp
+            pred_disps = []
 
         vx_lst = [-1, 1]
         vy_lst = [-1, 1]
@@ -79,7 +79,6 @@ class StereoINR(nn.Module):
             .unsqueeze(0).expand(feat.shape[0], 2, *feat.shape[-2:])
 
         preds = []
-        pred_disps = []
         areas = []
         for vx in vx_lst:
             for vy in vy_lst:
@@ -88,15 +87,16 @@ class StereoINR(nn.Module):
                 coord_[:, :, 0] += vx * rx + eps_shift
                 coord_[:, :, 1] += vy * ry + eps_shift
                 coord_.clamp_(-1 + 1e-6, 1 - 1e-6)
-                # disp_imnet input
-                q_disp = F.grid_sample(
-                    disp_normalized, coord_.flip(-1).unsqueeze(1),
-                    mode='nearest', align_corners=False)[:, :, 0, :] \
-                    .permute(0, 2, 1)
-                q_inp = F.grid_sample(
-                    feat, coord_.flip(-1).unsqueeze(1),
-                    mode='nearest', align_corners=False)[:, :, 0, :] \
-                    .permute(0, 2, 1)
+                if raw_disp is not None:
+                    # disp_imnet input
+                    q_disp = F.grid_sample(
+                        disp_normalized, coord_.flip(-1).unsqueeze(1),
+                        mode='nearest', align_corners=False)[:, :, 0, :] \
+                        .permute(0, 2, 1)
+                    q_inp = F.grid_sample(
+                        feat, coord_.flip(-1).unsqueeze(1),
+                        mode='nearest', align_corners=False)[:, :, 0, :] \
+                        .permute(0, 2, 1)
                 # imnet input
                 q_coef = F.grid_sample(
                     coef, coord_.flip(-1).unsqueeze(1),
@@ -121,12 +121,12 @@ class StereoINR(nn.Module):
                 rel_cell[:, :, 1] *= feat.shape[-1]
                 bs, q = coord.shape[:2]
                 coord_ff, _ = self.pe(rel_coord)
-
-                # pred HR disp
-                # q_disp = torch.mul(q_disp, 2/(rel_cell + 1e-6)[:, :, 1].unsqueeze(-1))
-                disp_inp = torch.cat((q_disp, q_inp, rel_coord), dim=-1)
-                pred_disp = self.disp_imnet(disp_inp).view(bs, q, -1)
-                pred_disps.append(pred_disp)
+                if raw_disp is not None:
+                    # pred HR disp
+                    # q_disp = torch.mul(q_disp, 2/(rel_cell + 1e-6)[:, :, 1].unsqueeze(-1))
+                    disp_inp = torch.cat((q_disp, q_inp, rel_coord), dim=-1)
+                    pred_disp = self.disp_imnet(disp_inp).view(bs, q, -1)
+                    pred_disps.append(pred_disp)
 
                 # pred HR rgb
                 q_freq = torch.mul(q_freq, coord_ff)
@@ -143,16 +143,21 @@ class StereoINR(nn.Module):
         t = areas[1]; areas[1] = areas[2]; areas[2] = t
         
         ret = 0
-        ret_disp = 0
-        for pred, pred_disp,  area in zip(preds, pred_disps, areas):
+        for pred, area in zip(preds, areas):
             ret = ret + pred * (area / tot_area).unsqueeze(-1)
-            ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
         rgb = ret + F.grid_sample(lr, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
-        disp = ret_disp + F.grid_sample(self.raw_disp*scale, coord.flip(-1).unsqueeze(1), mode='bilinear',\
+        
+        if raw_disp is not None:
+            ret_disp = 0
+            for pred_disp, area in zip(pred_disps, areas):
+                ret_disp = ret_disp + pred_disp * (area / tot_area).unsqueeze(-1)
+            disp = ret_disp + F.grid_sample(self.raw_disp*scale, coord.flip(-1).unsqueeze(1), mode='bilinear',\
                       padding_mode='border', align_corners=False)[:, :, 0, :] \
                       .permute(0, 2, 1)
+        else:
+            disp = None        
         return rgb, disp
 
     
@@ -168,15 +173,17 @@ class StereoINR(nn.Module):
         raw_disp, out_left, out_right = self.refine_corr(feat_left, feat_right, M_right_to_left)
         # self.feat_left, self.feat_right = out_left, out_right
 
-        out_l, disp = self.query_rgb(inp_l, out_left, coord, cell)
+        out_l, disp = self.query_rgb(inp_l, out_left, coord, cell, raw_disp)
         out_r, _ = self.query_rgb(inp_r, out_right, coord, cell)
 
         out_rgb = torch.cat((out_l, out_r), dim=-1)
         out['out_rgb'] = out_rgb
-        out['disp'] = disp
+        out['raw_disp'] = raw_disp
         # warp for disparity loss (training)
         if self.training:
             with torch.no_grad():
                 warp_r = self.warp(inp_l, out_left, disp, coord, cell)
             out['warp_r'] = warp_r
+        else:
+            out['disp'] = disp
         return out

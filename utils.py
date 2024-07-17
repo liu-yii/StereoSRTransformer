@@ -165,3 +165,16 @@ def warp_grid(inp_coord, disp, cell):
     coord = inp_coord + rel_flow
     coord = coord.clamp_(-1, 1)
     return coord
+
+
+def loss_disp_smoothness(disp, img):
+    img_grad_x = img[:, :, :, :-1] - img[:, :, :, 1:]
+    img_grad_y = img[:, :, :-1, :] - img[:, :, 1:, :]
+    weight_x = torch.exp(-torch.abs(img_grad_x).mean(1).unsqueeze(1))
+    weight_y = torch.exp(-torch.abs(img_grad_y).mean(1).unsqueeze(1))
+
+    loss = (((disp[:, :, :, :-1] - disp[:, :, :, 1:]).abs() * weight_x).sum() +
+            ((disp[:, :, :-1, :] - disp[:, :, 1:, :]).abs() * weight_y).sum()) / \
+           (weight_x.sum() + weight_y.sum())
+
+    return loss

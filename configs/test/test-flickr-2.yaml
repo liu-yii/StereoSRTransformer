@@ -2,7 +2,7 @@ test_dataset:
   dataset:
     name: stereo-image-folder
     args:
-      root_path: E:/Research/Datasets/iPASSR/test/Flickr1024/hr
+      root_path: E:/Research/Datasets/iPASSR/test/Middlebury/hr
       cache: in_memory
   wrapper:
     name: stereo-sr-implicit-downsampled
@@ -11,8 +11,8 @@ test_dataset:
       # window_size: 8
   batch_size: 1 
 eval_type: benchmark-2
-eval_bsize: 5000
-save_dir: "results/flickr-x2"
+eval_bsize: 3000
+save_dir: "results"
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}

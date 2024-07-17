@@ -14,7 +14,7 @@ test_dataset:
   batch_size: 1
 eval_type: benchmark-4
 eval_bsize: 30000
-save_dir: "results/flickr-x4"
+save_dir: "results"
 
 data_norm:
   inp: {sub: [0.5], div: [0.5]}

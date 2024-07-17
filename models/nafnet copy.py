@@ -2,6 +2,8 @@
 
 import numpy as np
 from argparse import Namespace
+from models.crossarch import MultiheadAttentionRelative
+from models.positionencoder import PositionEncodingSine1DRelative
 import torch
 import torch.nn as nn
 
@@ -195,6 +197,91 @@ class NAFBlock(nn.Module):
 
         return y + x * self.gamma
 
+
+class CrossAttention(nn.Module):
+    """
+    Cross attention layer
+    """
+    def __init__(self, hidden_dim: int, nhead: int):
+        super().__init__()
+        self.cross_attn = MultiheadAttentionRelative(hidden_dim, nhead)
+
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+    def forward(self, feat_left, feat_right,
+                pos = None,
+                pos_indexes = None,
+                last_layer = False):
+        """
+        :param feat_left: left image feature, [W,HN,C]
+        :param feat_right: right image feature, [W,HN,C]
+        :param pos: pos encoding, [2W-1,HN,C]
+        :param pos_indexes: indexes to slicer pos encoding [W,W]
+        :param last_layer: Boolean indicating if the current layer is the last layer
+        :return: update image feature and attention weight
+        """
+        # flatten NxCxHxW to WxHNxC
+        bs, c, hn, w = feat_left.shape
+
+        feat_left = feat_left.permute(1, 3, 2, 0).flatten(2).permute(1, 2, 0)  # CxWxHxN -> CxWxHN -> WxHNxC
+        feat_right = feat_right.permute(1, 3, 2, 0).flatten(2).permute(1, 2, 0)
+
+        # concatenate left and right features
+        feat_left_2 = self.norm1(feat_left)
+        feat_right_2 = self.norm1(feat_right)
+
+        # torch.save(torch.cat([feat_left_2, feat_right_2], dim=1), 'feat_cross_attn_input_' + str(layer_idx) + '.dat')
+
+        # update right features
+        if pos is not None:
+            pos_flipped = torch.flip(pos, [0])
+        else:
+            pos_flipped = pos
+        feat_right_2 = self.cross_attn(query=feat_right_2, key=feat_left_2, value=feat_left_2, pos_enc=pos_flipped,
+                                       pos_indexes=pos_indexes)[0]
+
+        feat_right = feat_right + feat_right_2
+
+        # update left features
+        # use attn mask for last layer
+        if last_layer:
+            w = feat_left_2.size(0)
+            attn_mask = self._generate_square_subsequent_mask(w).to(feat_left.device)  # generate attn mask
+        else:
+            attn_mask = None
+
+        # normalize again the updated right features
+        feat_right_2 = self.norm2(feat_right)
+        feat_left_2, attn_weight, raw_attn = self.cross_attn(query=feat_left_2, key=feat_right_2, value=feat_right_2,
+                                                             attn_mask=attn_mask, pos_enc=pos,
+                                                             pos_indexes=pos_indexes)
+
+        # torch.save(attn_weight, 'cross_attn_' + str(layer_idx) + '.dat')
+
+        feat_left = feat_left + feat_left_2
+
+        # concat features
+        # feat = torch.cat([feat_left, feat_right], dim=1)  # Wx2HNxC
+        raw_attn = raw_attn.view(hn, bs, w, w).permute(1, 0, 2, 3)
+        out_left = feat_left.view(w, hn, bs, c).permute(2, 3, 1, 0)
+        out_right = feat_right.view(w, hn, bs, c).permute(2, 3, 1, 0)
+
+        # return feat, raw_attn
+        return out_left, out_right, raw_attn
+
+    @torch.no_grad()
+    def _generate_square_subsequent_mask(self, sz: int):
+        """
+        Generate a mask which is upper triangular
+
+        :param sz: square matrix size
+        :return: diagonal binary mask [sz,sz]
+        """
+        mask = torch.triu(torch.ones(sz, sz), diagonal=1)
+        mask[mask == 1] = float('-inf')
+        return mask
+
+
 class SCAM(nn.Module):
     '''
     Stereo Cross Attention Module (SCAM)
@@ -270,15 +357,16 @@ class NAFBlockSR(nn.Module):
     def __init__(self, c, fusion=False, drop_out_rate=0.):
         super().__init__()
         self.blk = NAFBlock(c, drop_out_rate=drop_out_rate).cuda()
-        self.fusion = SCAM(c).cuda() if fusion else None
+        # self.fusion = SCAM(c).cuda() if fusion else None
+        self.fusion = CrossAttention(c, nhead = 8)
         # self.fusion = CrossFusion(d_model = c, nhead = 8).cuda() if fusion else None
 
-    def forward(self, x_left, x_right):
+    def forward(self, x_left, x_right, pos_enc, pos_indexes,last_layer=False):
         feat_left = self.blk(x_left)
         feat_right = self.blk(x_right)
-
+        last_layer = last_layer
         if self.fusion:
-            feat_left, feat_right, attn = self.fusion(feat_left, feat_right)
+            feat_left, feat_right, attn = self.fusion(feat_left, feat_right, pos_enc, pos_indexes,  last_layer)
         return feat_left, feat_right, attn
 
 class NAFNetSR(nn.Module):
@@ -292,6 +380,7 @@ class NAFNetSR(nn.Module):
         self.drop_out_rate = args.drop_out_rate
         self.no_upsampling = args.no_upsampling
         self.body = nn.ModuleList()
+        self.pos_encoder = PositionEncodingSine1DRelative(args.width, normalize=False)
         self.num_blks = args.num_blks
         self.intro = nn.Conv2d(in_channels=args.img_channel, out_channels=args.width, kernel_size=3, padding=1, stride=1, groups=1,
                               bias=True)
@@ -317,24 +406,31 @@ class NAFNetSR(nn.Module):
         feat_left, feat_right = feat.chunk(2, dim=0)
         shallow_feat_l, shallow_feat_r = feat_left, feat_right
         b, c, h, w = feat_left.shape
-        cost = [
-            torch.zeros(b, h, w, w).to(x.device),
-            torch.zeros(b, h, w, w).to(x.device)
-        ]
+        # cost = torch.zeros((b,h,w,w)).to(feat_left.device)
+        pos_enc = self.pos_encoder(feat_left)
 
+        if pos_enc is not None:
+            with torch.no_grad():
+                # indexes to shift rel pos encoding
+                indexes_r = torch.linspace(w - 1, 0, w).view(w, 1).to(feat_left.device)
+                indexes_c = torch.linspace(0, w - 1, w).view(1, w).to(feat_left.device)
+                pos_indexes = (indexes_r + indexes_c).view(-1).long()  # WxW' -> WW'
+        else:
+            pos_indexes = None
+        
         for i in range(len(self.body)):
-            feat_left, feat_right, attn = self.body[i](feat_left, feat_right)
-            cost[0] += attn[0]
-            cost[1] += attn[1]
+            last_layer = i == len(self.body) - 1
+            feat_left, feat_right, attn = self.body[i](feat_left, feat_right, pos_enc, pos_indexes, last_layer)
+            # cost = cost + attn
         
         feat_left = feat_left + shallow_feat_l
         feat_right = feat_right + shallow_feat_r
         
-        return feat_left, feat_right, cost
+        return feat_left, feat_right, attn
 
 
 @register('nafnet')
-def make_nafnet(up_scale=4, width=48, num_blks=16, img_channel=3, drop_path_rate=0., drop_out_rate=0., fusion_from=-1, fusion_to=16, dual=True, no_upsampling =True):
+def make_nafnet(up_scale=4, width=48, num_blks=16, img_channel=3, drop_path_rate=0., drop_out_rate=0., fusion_from=-1, fusion_to=32, dual=True, no_upsampling =True):
     args = Namespace()
     args.up_scale = up_scale
     args.width = width
@@ -350,3 +446,6 @@ def make_nafnet(up_scale=4, width=48, num_blks=16, img_channel=3, drop_path_rate
     args.no_upsampling = no_upsampling
 
     return NAFNetSR(args)
+
+
+

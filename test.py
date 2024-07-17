@@ -18,13 +18,8 @@ import numpy as np
 
 def batched_predict(model, inp, coord, cell, bsize):
     with torch.no_grad():
-        start_time = time.time()
         feat_left, feat_right, corr = model.gen_feat(inp)
-        gen_feat_time = time.time()
-        time1 = gen_feat_time - start_time
         raw_disp, refined_left, refined_right = model.refine_corr(feat_left, feat_right, corr)
-        refine_time = time.time()
-        time2 = refine_time - gen_feat_time
         inp_l, inp_r = inp.chunk(2, dim=1)
         n = coord.shape[1]
         ql = 0
@@ -34,21 +29,20 @@ def batched_predict(model, inp, coord, cell, bsize):
         while ql < n:
             qr = min(ql + bsize, n)
             pred_r,_ = model.query_rgb(inp_r, refined_right, coord[:, ql: qr, :], cell[:, ql: qr, :])
-            preds_r.append(pred_r.detach().cpu())
-            pred_l, disp = model.query_rgb(inp_l, refined_left, coord[:, ql: qr, :], cell[:, ql: qr, :])
-            preds_l.append(pred_l.detach().cpu())
-            disps.append(disp.detach().cpu())
+            preds_r.append(pred_r)
+            pred_l, disp = model.query_rgb(inp_l, refined_left, coord[:, ql: qr, :], cell[:, ql: qr, :], raw_disp)
+            preds_l.append(pred_l)
+            disps.append(disp)
             del pred_r, pred_l, disp
-            torch.cuda.empty_cache()
             ql = qr
         pred_l = torch.cat(preds_l, dim=1)
         pred_r = torch.cat(preds_r, dim=1)
         pred_disp = torch.cat(disps, dim=1)
         pred = torch.cat([pred_l, pred_r], dim=-1)
-    return pred.cuda(), pred_disp.cuda()
+    return pred, pred_disp
 
 
-def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, window_size=0, scale_max=4, fast=False,
+def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, window_size=0, scale_max=4, fast=False, save_dir=None,
               verbose=False):
     model.eval()
 
@@ -76,7 +70,7 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
         raise NotImplementedError
 
     val_res = utils.Averager()
-
+    save_idx = 1
     pbar = tqdm(loader, leave=False, desc='val')
     for batch in pbar:
         for k, v in batch.items():
@@ -121,25 +115,26 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None, wi
         pred_l, pred_r = pred.chunk(2, dim=-1)
         gt_left, gt_right = batch['gt'].chunk(2, dim=-1)
         if eval_type is not None: 
-            idx = 1
-            # img_l
-            img_l = pred_l.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
-            img_l = (img_l * 255.0).round().astype(np.uint8)
-            img_l = Image.fromarray(img_l)
-            img_l.save('results/{:0>4d}_l.png'.format(idx))
-            # img_r
-            img_r = pred_r.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
-            img_r = (img_r * 255.0).round().astype(np.uint8)
-            img_r = Image.fromarray(img_r)
-            img_r.save('results/{:0>4d}_r.png'.format(idx))
+            if save_dir is not None:
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+                # img_l
+                img_l = pred_l.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
+                img_l = (img_l * 255.0).round().astype(np.uint8)
+                img_l = Image.fromarray(img_l)
+                img_l.save(save_dir + '/{:0>4d}_l.png'.format(save_idx))
+                # img_r
+                img_r = pred_r.clamp_(0, 1).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 3).cpu().numpy()
+                img_r = (img_r * 255.0).round().astype(np.uint8)
+                img_r = Image.fromarray(img_r)
+                img_r.save(save_dir + '/{:0>4d}_r.png'.format(save_idx))
 
-            # img_disp
-            img_disp = pred_disp.clamp_(0).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 1).cpu().numpy()
-            img_disp = img_disp.round().astype(np.uint8)
-            img_disp = Image.fromarray(img_disp[:,:,0], mode='L')
-            img_disp.save('results/{:0>4d}_disp.png'.format(idx))
-
-            idx += 1
+                # img_disp
+                img_disp = pred_disp.clamp_(0).view(scale*(h_old+h_pad), scale*(w_old+w_pad), 1).cpu().numpy()
+                img_disp = img_disp.round().astype(np.uint8)
+                img_disp = Image.fromarray(img_disp[:,:,0], mode='L')
+                img_disp.save(save_dir + '/{:0>4d}_disp.png'.format(save_idx))
+                save_idx += 1
         if eval_type is not None and fast == False: # reshape for shaving-eval
             # gt reshape
             ih, iw = batch['inp'].shape[-2:]
@@ -187,6 +182,9 @@ if __name__ == '__main__':
     with open(args.config, 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
+    save_path = args.model.split('/')[-2] + "_" + args.config.split('-')[-1][:-len('.yaml')] + "xSR"
+    save_dir = os.path.join(config['save_dir'], save_path)
+
     spec = config['test_dataset']
     dataset = datasets.make(spec['dataset'])
     dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
@@ -203,5 +201,6 @@ if __name__ == '__main__':
         window_size=int(args.window),
         scale_max = int(args.scale_max),
         fast = args.fast,
+        save_dir = save_dir,
         verbose=True)
     print('result: {:.4f}'.format(res))

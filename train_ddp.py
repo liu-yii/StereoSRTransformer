@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 
 import datasets
@@ -22,20 +23,26 @@ def make_data_loader(spec, tag=''):
 
     dataset = datasets.make(spec['dataset'])
     dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
-
+    if tag == 'train':
+        sampler = DistributedSampler(dataset)
+    else:
+        sampler = None
     log('{} dataset: size={}'.format(tag, len(dataset)))
     for k, v in dataset[0].items():
         log('  {}: shape={}'.format(k, tuple(v.shape)))
-
-    loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        shuffle=(tag == 'train'), num_workers=0, pin_memory=True)
-    return loader
+    if tag =='train':
+        loader = DataLoader(dataset, sampler=sampler, batch_size=spec['batch_size'],
+            num_workers=16, pin_memory=True)
+    else:
+        loader = DataLoader(dataset, batch_size=spec['batch_size'],
+            shuffle=False, num_workers=16, pin_memory=True)
+    return loader, sampler
 
 
 def make_data_loaders():
-    train_loader = make_data_loader(config.get('train_dataset'), tag='train')
-    val_loader = make_data_loader(config.get('val_dataset'), tag='val')
-    return train_loader, val_loader
+    train_loader, train_sampler = make_data_loader(config.get('train_dataset'), tag='train')
+    val_loader, _ = make_data_loader(config.get('val_dataset'), tag='val')
+    return train_loader, val_loader, train_sampler
 
 
 def prepare_training():
@@ -43,7 +50,9 @@ def prepare_training():
     if config.get('resume') is not None and os.path.exists(config.get('resume')):
         print("Resuming training from checkpoint...", config['resume'])
         sv_file = torch.load(config['resume'])
-        model = models.make(sv_file['model'], load_sd=True).cuda()
+        if isinstance(model, torch.nn.DataParallel):
+            model = model.module
+        model = models.make(sv_file['model'], load_sd=True).to(device)
         optimizer = utils.make_optimizer(
             model.parameters(), sv_file['optimizer'], load_sd=True)
         epoch_start = sv_file['epoch'] + 1
@@ -57,7 +66,7 @@ def prepare_training():
             lr_scheduler.step()
     else:
         print("Starting training from scratch...")
-        model = models.make(config['model']).cuda()
+        model = models.make(config['model']).to(device)
         optimizer = utils.make_optimizer(
             model.parameters(), config['optimizer'])
         epoch_start = 1
@@ -99,17 +108,16 @@ def train(train_loader, model, optimizer, \
         pred = model(inp, batch['coord'], batch['cell'])
         # stereo
         pred_l, pred_r = pred['out_rgb'].chunk(2, dim=-1)
+        pred_disp = pred['disp']
 
         gt = (batch['gt'] - gt_sub) / gt_div
         gt_l, gt_r = gt.chunk(2, dim=-1)
-        inp_l, _ = inp.chunk(2, dim=1)
         loss = loss_fn(pred_l, gt_l) + loss_fn(pred_r, gt_r)
 
+        # disparity loss
         warp_r = pred['warp_r']
         loss_warp = loss_fn(warp_r, gt_r)
-        
-        # loss_smooth = utils.loss_disp_smoothness(inp_l, pred['raw_disp'])
-        loss = loss + 0.1 * loss_warp # + 0.1 * loss_smooth
+        loss = loss + 0.1*loss_warp
         psnr = metric_fn(pred['out_rgb'], gt)
         
         # tensorboard
@@ -123,19 +131,19 @@ def train(train_loader, model, optimizer, \
         loss.backward()
         optimizer.step()
 
-        pred = None; loss = None
+        pred = None; loss = None; warp_r = None
         
     return train_loss.item()
 
 
-def main(config_, save_path):
+def main(config_, save_path, args):
     global config, log, writer
     config = config_
     log, writer = utils.set_save_path(save_path, remove=False)
     with open(os.path.join(save_path, 'config.yaml'), 'w') as f:
         yaml.dump(config, f, sort_keys=False)
 
-    train_loader, val_loader = make_data_loaders()
+    train_loader, val_loader, train_sampler = make_data_loaders()
     if config.get('data_norm') is None:
         config['data_norm'] = {
             'inp': {'sub': [0], 'div': [1]},
@@ -146,7 +154,10 @@ def main(config_, save_path):
 
     n_gpus = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
     if n_gpus > 1:
-        model = nn.parallel.DataParallel(model)
+        log('use {} gpus!'.format(n_gpus))
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
+                                                output_device=args.local_rank)
+        # model = nn.parallel.DataParallel(model)
 
     epoch_max = config['epoch_max']
     epoch_val = config.get('epoch_val')
@@ -156,6 +167,7 @@ def main(config_, save_path):
     timer = utils.Timer()
 
     for epoch in range(epoch_start, epoch_max + 1):
+        train_sampler.set_epoch(epoch)
         t_epoch_start = timer.t()
         log_info = ['epoch {}/{}'.format(epoch, epoch_max)]
 
@@ -221,8 +233,15 @@ if __name__ == '__main__':
     parser.add_argument('--name', default=None)
     parser.add_argument('--tag', default=None)
     parser.add_argument('--gpu', default='0')
+    parser.add_argument('--local_rank', default=os.getenv('LOCAL_RANK', -1), type=int)
     args = parser.parse_args()
 
+    if args.local_rank != -1:
+        torch.cuda.set_device(args.local_rank)
+        device = torch.device("cuda", args.local_rank)
+        torch.distributed.init_process_group(backend="nccl", init_method='env://')
+    else:
+        device = torch.device("cuda")
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     with open(args.config, 'r') as f:
@@ -236,4 +255,4 @@ if __name__ == '__main__':
         save_name += '_' + args.tag
     save_path = os.path.join('./save', save_name)
     
-    main(config, save_path)
+    main(config, save_path, args)

@@ -171,7 +171,6 @@ class Transformer(nn.Module):
         # alternating
         for idx, (self_attn, cross_attn) in enumerate(zip(self.self_attn_layers, self.cross_attn_layers)):
             layer_idx = idx
-
             # checkpoint self attn
             def create_custom_self_attn(module):
                 def custom_self_attn(*inputs):
@@ -180,7 +179,6 @@ class Transformer(nn.Module):
                 return custom_self_attn
 
             feat = checkpoint(create_custom_self_attn(self_attn), feat, pos_enc, pos_indexes)
-
             # add a flag for last layer of cross attention
             if idx == self.num_attn_layers - 1:
                 # checkpoint cross attn
@@ -492,8 +490,177 @@ class dispnet(nn.Module):
         :param feat_right: feature descriptor of right image, [N,C,H,W]
         :return: low res disparity, [N,1,H,W], left and right feature maps [N,C,H,W]
         """
+        b,_,h,w = feat_left.shape
         attn_weight, out_left, out_right = self.transformer(feat_left, feat_right, pos_enc)
-        attn_weight = attn_weight + init_corr
+        attn_weight = attn_weight + torch.softmax(init_corr, dim=-1)
+        # out_left = out_left + feat_left
+        # out_right = out_right + feat_right
+        
+        # normalize attention to 0-1
+        if self.ot:
+            # optimal transport
+            attn_ot = self._optimal_transport(attn_weight, 10)
+        else:
+            # softmax
+            attn_ot = self._softmax(attn_weight)
+
+        # regress low res disparity
+        pos_shift = self._compute_unscaled_pos_shift(attn_weight.shape[2], attn_weight.device)  # NxHxW_leftxW_right
+        raw_disp, matched_attn = self._compute_low_res_disp(pos_shift, attn_ot[..., :-1, :-1])
+        raw_disp[raw_disp < 0] = 0
+        raw_disp[raw_disp > w - 1] = 0
+        # regress low res occlusion
+        raw_occ = self._compute_low_res_occ(matched_attn)
+        raw_disp, raw_occ = raw_disp.unsqueeze(1), raw_occ.unsqueeze(1)
+
+        return raw_disp, out_left, out_right
+    
+
+class dispnet_norefine(nn.Module):
+    def __init__(self, hidden_dim=128, nhead=4, num_attn_layers=4, ot=True):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.num_attn_layers = num_attn_layers
+        self.ot = ot
+        self.phi = nn.Parameter(torch.tensor(0.0, requires_grad=True))  # dustbin cost
+    
+    def _compute_unscaled_pos_shift(self, w, device):
+        """
+        Compute relative difference between each pixel location from left image to right image, to be used to calculate
+        disparity
+
+        :param w: image width
+        :param device: torch device
+        :return: relative pos shifts
+        """
+        pos_r = torch.linspace(0, w - 1, w)[None, None, None, :].to(device)  # 1 x 1 x 1 x W_right
+        pos_l = torch.linspace(0, w - 1, w)[None, None, :, None].to(device)  # 1 x 1 x W_left x1
+        pos = pos_l - pos_r
+        pos[pos < 0] = 0
+        return pos
+
+    def _compute_low_res_disp(self, pos_shift, attn_weight, occ_mask = None):
+        """
+        Compute low res disparity using the attention weight by finding the most attended pixel and regress within the 3px window
+
+        :param pos_shift: relative pos shift (computed from _compute_unscaled_pos_shift), [1,1,W,W]
+        :param attn_weight: attention (computed from _optimal_transport), [N,H,W,W]
+        :param occ_mask: ground truth occlusion mask, [N,H,W]
+        :return: low res disparity, [N,H,W] and attended similarity sum, [N,H,W]
+        """
+
+        # find high response area
+        high_response = torch.argmax(attn_weight, dim=-1)  # NxHxW
+
+        # build 3 px local window
+        response_range = torch.stack([high_response - 1, high_response, high_response + 1], dim=-1)  # NxHxWx3
+
+        # attention with re-weighting
+        attn_weight_pad = F.pad(attn_weight, [1, 1], value=0.0)  # N x Hx W_left x (W_right+2)
+        attn_weight_rw = torch.gather(attn_weight_pad, -1, response_range + 1)  # offset range by 1, N x H x W_left x 3
+
+        # compute sum of attention
+        norm = attn_weight_rw.sum(-1, keepdim=True)
+        if occ_mask is None:
+            norm[norm < 0.1] = 1.0
+        else:
+            norm[occ_mask, :] = 1.0  # set occluded region norm to be 1.0 to avoid division by 0
+
+        # re-normalize to 1
+        attn_weight_rw = attn_weight_rw / norm  # re-sum to 1
+        pos_pad = F.pad(pos_shift, [1, 1]).expand_as(attn_weight_pad)
+        pos_rw = torch.gather(pos_pad, -1, response_range + 1)
+
+        # compute low res disparity
+        disp_pred_low_res = (attn_weight_rw * pos_rw)  # NxHxW
+
+        return disp_pred_low_res.sum(-1), norm
+
+    def _sinkhorn(self, attn, log_mu, log_nu, iters):
+        """
+        Sinkhorn Normalization in Log-space as matrix scaling problem.
+        Regularization strength is set to 1 to avoid manual checking for numerical issues
+        Adapted from SuperGlue (https://github.com/magicleap/SuperGluePretrainedNetwork)
+
+        :param attn: input attention weight, [N,H,W+1,W+1]
+        :param log_mu: marginal distribution of left image, [N,H,W+1]
+        :param log_nu: marginal distribution of right image, [N,H,W+1]
+        :param iters: number of iterations
+        :return: updated attention weight
+        """
+
+        u, v = torch.zeros_like(log_mu), torch.zeros_like(log_nu)
+        for idx in range(iters):
+            # scale v first then u to ensure row sum is 1, col sum slightly larger than 1
+            v = log_nu - torch.logsumexp(attn + u.unsqueeze(3), dim=2)
+            u = log_mu - torch.logsumexp(attn + v.unsqueeze(2), dim=3)
+
+        return attn + u.unsqueeze(3) + v.unsqueeze(2)
+
+    def _optimal_transport(self, attn, iters):
+        """
+        Perform Differentiable Optimal Transport in Log-space for stability
+        Adapted from SuperGlue (https://github.com/magicleap/SuperGluePretrainedNetwork)
+
+        :param attn: raw attention weight, [N,H,W,W]
+        :param iters: number of iterations to run sinkhorn
+        :return: updated attention weight, [N,H,W+1,W+1]
+        """
+        bs, h, w, _ = attn.shape
+
+        # set marginal to be uniform distribution
+        marginal = torch.cat([torch.ones([w]), torch.tensor([w]).float()]) / (2 * w)
+        log_mu = marginal.log().to(attn.device).expand(bs, h, w + 1)
+        log_nu = marginal.log().to(attn.device).expand(bs, h, w + 1)
+
+        # add dustbins
+        similarity_matrix = torch.cat([attn, self.phi.expand(bs, h, w, 1).to(attn.device)], -1)
+        similarity_matrix = torch.cat([similarity_matrix, self.phi.expand(bs, h, 1, w + 1).to(attn.device)], -2)
+
+        # sinkhorn
+        attn_ot = self._sinkhorn(similarity_matrix, log_mu, log_nu, iters)
+
+        # convert back from log space, recover probabilities by normalization 2W
+        attn_ot = (attn_ot + torch.log(torch.tensor([2.0 * w]).to(attn.device))).exp()
+
+        return attn_ot
+
+    def _softmax(self, attn):
+        """
+        Alternative to optimal transport
+
+        :param attn: raw attention weight, [N,H,W,W]
+        :return: updated attention weight, [N,H,W+1,W+1]
+        """
+        bs, h, w, _ = attn.shape
+
+        # add dustbins
+        similarity_matrix = torch.cat([attn, self.phi.expand(bs, h, w, 1).to(attn.device)], -1)
+        similarity_matrix = torch.cat([similarity_matrix, self.phi.expand(bs, h, 1, w + 1).to(attn.device)], -2)
+
+        attn_softmax = F.softmax(similarity_matrix, dim=-1)
+
+        return attn_softmax
+
+    def _compute_low_res_occ(self, matched_attn):
+        """
+        Compute low res occlusion by using inverse of the matched values
+
+        :param matched_attn: updated attention weight without dustbins, [N,H,W,W]
+        :return: low res occlusion map, [N,H,W]
+        """
+        occ_pred = 1.0 - matched_attn
+        return occ_pred.squeeze(-1)
+    
+    def forward(self, init_corr, feat_left, feat_right, pos_enc = None):
+        """
+        :param feat_left: feature descriptor of left image, [N,C,H,W]
+        :param feat_right: feature descriptor of right image, [N,C,H,W]
+        :return: low res disparity, [N,1,H,W], left and right feature maps [N,C,H,W]
+        """
+        out_left, out_right = feat_left, feat_right
+        attn_weight = init_corr
          # normalize attention to 0-1
         if self.ot:
             # optimal transport
